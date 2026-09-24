@@ -70,6 +70,20 @@ High and 31.6 FPS in Ultra, with 4x MSAA in both modes. These are short probe
 runs, a baseline for the next visual and performance iteration. This driver
 did not return usable GPU timer results, so the overlay shows the GPU name.
 
+For a ten-second MP4 export, the probe can stream 300 GPU-rendered RGBA frames
+at 720x1600 and 30 FPS into FFmpeg:
+
+```sh
+LD_LIBRARY_PATH=/apex/com.android.i18n/lib64:/apex/com.android.runtime/lib64/bionic:/system/lib64 \
+    /system/bin/linker64 "$(pwd)/bazel-bin/native_buttons/gpu_probe" --video | \
+    ffmpeg -f rawvideo -pixel_format rgba -video_size 720x1600 -framerate 30 \
+        -i pipe:0 -vf vflip -an -c:v libx264 -preset veryfast -crf 20 \
+        -pix_fmt yuv420p -threads 2 -movflags +faststart /tmp/native-buttons-10s.mp4
+```
+
+This exports a fresh instance of the app's scene with a zero counter on the
+local GPU. It does not capture the running Activity or Android's system UI.
+
 Signing uses the debug key bundled with `rules_android`, so no local key or
 preparation script is needed. This certificate differs from the previous
 local demo key: Android cannot install it as an update over that older APK.

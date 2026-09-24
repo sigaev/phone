@@ -5,11 +5,54 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 #include "common/gpu/renderer.h"
 #include "native_buttons/scene.h"
 
 namespace {
+common::Result<void> export_video() {
+    constexpr int kWidth = 720;
+    constexpr int kHeight = 1600;
+    constexpr int kFrameRate = 30;
+    constexpr int kFrameCount = 10 * kFrameRate;
+    auto renderer =
+        gpu::create_renderer(nullptr, native_buttons::get_scene_shaders(), kWidth, kHeight);
+    if (!renderer)
+        return std::unexpected(renderer.error());
+    auto scene = native_buttons::create_scene(**renderer);
+    if (!scene)
+        return std::unexpected(scene.error());
+    std::fprintf(stderr, "Exporting 10 seconds from %s at %dx%d, %d fps\n",
+                 gpu::get_device(**renderer).data(), kWidth, kHeight, kFrameRate);
+    std::vector<unsigned char> pixels(kWidth * kHeight * 4);
+    float fps = 0;
+    for (int i = 0; i < kFrameCount; ++i) {
+        auto begin = std::chrono::steady_clock::now();
+        auto result =
+            native_buttons::render_scene(**scene, 2.f + float(i) / kFrameRate, .34f, false, 0, 0,
+                                         fps, false, {0, 45.f, float(kWidth), kHeight - 85.f});
+        if (!result)
+            return std::unexpected(result.error());
+        glFinish();
+        float elapsed =
+            std::chrono::duration<float>(std::chrono::steady_clock::now() - begin).count();
+        fps = i == 0 ? 1.f / elapsed : fps * .85f + .15f / elapsed;
+        glReadPixels(0, 0, kWidth, kHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        if (glGetError() != GL_NO_ERROR)
+            return std::unexpected(common::Error{"Cannot capture the GPU frame"});
+        // Stream bottom-up RGBA to the encoder without storing raw frames on disk.
+        if (std::fwrite(pixels.data(), 1, pixels.size(), stdout) != pixels.size())
+            return std::unexpected(common::Error{"Cannot write the video frame"});
+        if ((i + 1) % kFrameRate == 0)
+            std::fprintf(stderr, "Exported %d / 10 seconds\n", (i + 1) / kFrameRate);
+    }
+    if (std::fflush(stdout) != 0)
+        return std::unexpected(common::Error{"Cannot finish the video stream"});
+    return {};
+}
+
 common::Result<void> run_probe(int argc, char** argv) {
     int width = argc > 2 ? std::atoi(argv[2]) : 1080;
     int height = argc > 3 ? std::atoi(argv[3]) : 2400;
@@ -62,7 +105,8 @@ common::Result<void> run_probe(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    auto result = run_probe(argc, argv);
+    auto result =
+        argc > 1 && std::strcmp(argv[1], "--video") == 0 ? export_video() : run_probe(argc, argv);
     if (!result) {
         std::fprintf(stderr, "%s\n", result.error().message.c_str());
         return 1;
