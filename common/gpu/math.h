@@ -24,6 +24,8 @@ Vec3 cross(Vec3 a, Vec3 b);
 float length(Vec3 value);
 Vec3 unit(Vec3 value);
 bool contains(Rect rect, float x, float y);
+// Wrap to [0, period), including negative values. period must be positive.
+float wrap(float value, float period);
 Mat4 translation(Vec3 position);
 Mat4 scale(Vec3 size);
 Mat4 rotate_x(float angle);

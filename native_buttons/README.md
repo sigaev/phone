@@ -14,7 +14,10 @@ There is no software rasterizer.
 Text uses a GPU atlas baked from the device's Roboto font with the shared
 `@stb//:stb_truetype` library fetched by Bazel. Its upstream header includes
 its license; no third-party source is copied into this repository.
-The custom controls do not expose accessibility nodes.
+The app remains C++-only, using Android's built-in `NativeActivity` with no
+Java application sources or DEX code. Tab/Shift+Tab and arrow keys move focus;
+Enter, Space, or the D-pad center activates the focused control. These GPU-drawn
+controls still do not expose TalkBack accessibility nodes.
 
 The camera circles the pelican once per minute with a gentle rise and fall and
 small distance changes. Drag to adjust the view through a full circle. Pause
@@ -26,6 +29,12 @@ The feet and crank arms share the same forward-pedaling motion.
 The display shows measured frame rate and GPU time when timer queries are
 available. The frame loop follows Android's Choreographer, requests a 60 Hz
 display mode, and stops when the Activity pauses or loses its window.
+Rendering and counter persistence run on a dedicated native thread. Required
+window-redraw callbacks wait for a completed frame, including while paused;
+window-destruction callbacks wait until the worker releases the surface.
+Counter updates replace the saved file atomically after flushing a temporary
+file, so a failed write preserves the previous value. Save failures are shown
+in the counter panel and in an Android toast.
 
 ## Build
 
@@ -39,8 +48,8 @@ bazel build //native_buttons
 Output: `bazel-bin/native_buttons/native_buttons.apk`.
 `bazel build //...` also builds the app and shared libraries.
 
-`native_buttons_lib` compiles `main.cc` with `cc_library` and links the scene
-and shared renderer. `alwayslink`
+`native_buttons_lib` compiles the lifecycle/input adapter in `main.cc` and links
+the worker runtime, storage, scene, and shared renderer. `alwayslink`
 preserves the dynamically discovered `ANativeActivity_onCreate` entry point.
 Compiler and linker flags come from `//tools:android.bzl`, including
 C++23, full symbol stripping, and 16 KiB ELF segment alignment. Vulkan GLSL lives
@@ -76,23 +85,47 @@ The runner copies the executable to a temporary real Android `/data` path so the
 Vulkan loader can access the vendor GPU driver under PRoot, then removes it.
 GPU timestamps are available on this phone and appear in the overlay.
 
-Exercise renderer recreation, both orientations, quality transitions and readback:
+Run the native regression suite on the phone:
 
 ```sh
-bazel test //native_buttons:renderer_test --platforms=//:arm64-v8a \
+bazel test //common:runtime_test //native_buttons:application_test \
+    //native_buttons:scene_test //native_buttons:renderer_test \
+    //native_buttons:depth_fallback_test --platforms=//:arm64-v8a \
     --run_under=//tools:android_test_runner
 ```
 
-Enable Khronos API and synchronization validation for that same test:
+The application test exercises atomic persistence with an injected failed write,
+worker startup/shutdown, touch cancellation, keyboard navigation, lifecycle
+snapshots, paused redraw, insets, and surface recreation. The scene test checks
+actual scenery positions through 24 hours of animation and control hit testing.
+GPU tests exercise portrait and landscape offscreen targets, quality changes,
+readback, and fixed-quality animation with
+the changing UI excluded. The depth-fallback test simulates unsupported D24S8
+and renders with another format on the real GPU.
+
+Enable Khronos API and synchronization validation for the GPU tests:
 
 ```sh
-bazel test //native_buttons:renderer_test --platforms=//:arm64-v8a \
-    --define=vulkan_validation=true --run_under=//tools:vulkan_validation_runner
+bazel test //native_buttons:renderer_test //native_buttons:depth_fallback_test \
+    --platforms=//:arm64-v8a --define=vulkan_validation=true \
+    --run_under=//tools:vulkan_validation_runner
 ```
 
 The optional runner downloads the pinned Android validation layer through Bazel.
 Its Android layer-path bootstrap and validation callbacks are compiled only with
 that flag; neither they nor the validation library are included in the normal APK.
+
+Offscreen tests do not verify Android's compositor or the real Activity window.
+After installation, check portrait, landscape and reverse landscape, touch and
+keyboard controls, rotation while paused, background/resume, and Activity
+recreation. The counter and controls should remain upright and aligned with
+their touch targets. ADB (Android Debug Bridge) can install the APK, send input,
+and collect screenshots and logs from a connected Android device:
+
+```sh
+adb install -r bazel-bin/native_buttons/native_buttons.apk
+adb shell am start -n dev.demo.nativebuttons/android.app.NativeActivity
+```
 
 For a ten-second MP4 export, the probe can stream 300 GPU-rendered RGBA frames
 at 720x1600 and 30 FPS into FFmpeg:
@@ -113,7 +146,7 @@ preparation script is needed. This certificate differs from the previous
 local demo key: Android cannot install it as an update over that older APK.
 Uninstalling the older app removes its saved count.
 
-## Vulkan migration measurements
+## Historical Vulkan migration measurements
 
 Measured on this Pixel 8 Pro / Mali-G715, comparing the saved release from commit
 `62d0917` with the Vulkan release. Both executables ran locally from Android's

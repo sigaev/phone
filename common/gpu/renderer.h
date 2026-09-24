@@ -41,6 +41,8 @@ void add(Renderer& renderer, Shape shape, Mat4 model, Color color, float roughne
          float metal = 0, float emission = 0, float kind = 0);
 void add(Renderer& renderer, MeshId mesh, Mat4 model, Color color, float roughness = .45f,
          float metal = 0, float emission = 0, float kind = 0);
+// Refresh target dimensions before constructing the camera and UI layout.
+common::Result<void> prepare_frame(Renderer& renderer, bool maximum);
 common::Result<void> render(Renderer& renderer, Vec3 eye, Vec3 target, float time, bool maximum);
 void draw_rect(Renderer& renderer, Rect bounds, float radius, Color color);
 void draw_text(Renderer& renderer, const char* value, float x, float baseline, float height,

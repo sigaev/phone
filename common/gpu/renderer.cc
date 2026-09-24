@@ -43,6 +43,7 @@ constexpr int kAtlasSize = 1024;
 constexpr unsigned kFrameCount = 2;
 constexpr VkFormat kHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr std::uint64_t kWaitForever = std::numeric_limits<std::uint64_t>::max();
+constexpr std::uint64_t kFrameTimeout = 1000000000;
 constexpr std::uint32_t kFullVertex[] =
 #include "common/gpu/full_vert.inc"
     ;
@@ -157,6 +158,7 @@ struct Renderer {
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     VkSampler sampler = VK_NULL_HANDLE, shadow_sampler = VK_NULL_HANDLE;
+    VkFilter shadow_filter = VK_FILTER_NEAREST;
     VkRenderPass shadow_pass = VK_NULL_HANDLE, scene_pass = VK_NULL_HANDLE,
                  bloom_pass = VK_NULL_HANDLE, output_pass = VK_NULL_HANDLE;
     VkPipeline mesh_pipeline = VK_NULL_HANDLE, shadow_pipeline = VK_NULL_HANDLE,
@@ -405,15 +407,39 @@ Result<void> create_context(Renderer& r) {
     if (!features.largePoints)
         return fail("The particle renderer requires large points");
     vkGetPhysicalDeviceMemoryProperties(r.physical, &r.memory);
-    VkImageFormatProperties hdr_properties{}, depth_properties{};
+    VkImageFormatProperties hdr_properties{};
     VK_CHECK(vkGetPhysicalDeviceImageFormatProperties(
         r.physical, kHdrFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, &hdr_properties));
-    VK_CHECK(vkGetPhysicalDeviceImageFormatProperties(
-        r.physical, r.depth_format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, &depth_properties));
-    if (!(hdr_properties.sampleCounts & depth_properties.sampleCounts & VK_SAMPLE_COUNT_4_BIT))
-        return fail("4x HDR/depth multisampling is required");
+    if (!(hdr_properties.sampleCounts & VK_SAMPLE_COUNT_4_BIT))
+        return fail("4x HDR multisampling is required");
+    bool depth_found = false;
+    for (auto format : {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM,
+                        VK_FORMAT_D32_SFLOAT_S8_UINT}) {
+        VkImageFormatProperties attachment{}, shadow{};
+        auto attachment_result = vkGetPhysicalDeviceImageFormatProperties(
+            r.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+            0, &attachment);
+        auto shadow_result = vkGetPhysicalDeviceImageFormatProperties(
+            r.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, &shadow);
+        if (attachment_result != VK_SUCCESS || shadow_result != VK_SUCCESS ||
+            !(attachment.sampleCounts & VK_SAMPLE_COUNT_4_BIT) ||
+            !(shadow.sampleCounts & VK_SAMPLE_COUNT_1_BIT))
+            continue;
+        VkFormatProperties properties;
+        vkGetPhysicalDeviceFormatProperties(r.physical, format, &properties);
+        r.depth_format = format;
+        r.shadow_filter =
+            properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+                ? VK_FILTER_LINEAR
+                : VK_FILTER_NEAREST;
+        depth_found = true;
+        break;
+    }
+    if (!depth_found)
+        return fail("A sampled depth format with 4x attachment support is required");
     VkFormatProperties format_properties;
     vkGetPhysicalDeviceFormatProperties(r.physical, kHdrFormat, &format_properties);
     constexpr auto kHdrFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
@@ -534,6 +560,7 @@ Result<void> create_descriptors(Renderer& r) {
     VK_CHECK(vkCreateSampler(r.device, &sampler, nullptr, &r.sampler));
     sampler.compareEnable = VK_TRUE;
     sampler.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    sampler.magFilter = sampler.minFilter = r.shadow_filter;
     VK_CHECK(vkCreateSampler(r.device, &sampler, nullptr, &r.shadow_sampler));
     auto particles = create_buffer(
         r, 65536 * sizeof(Color),
@@ -853,7 +880,11 @@ Result<void> create_swapchain(Renderer& r) {
     info.imageExtent = {static_cast<unsigned>(r.width), static_cast<unsigned>(r.height)};
     info.imageArrayLayers = 1;
     info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    info.preTransform = capabilities.currentTransform;
+    // Render in window coordinates. Android's compositor applies display rotation;
+    // claiming currentTransform here would require rotating every output/UI vertex.
+    if (!(capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR))
+        return fail("The Vulkan surface does not support window-coordinate presentation");
+    info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
     for (auto alpha :
          {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
@@ -1307,25 +1338,29 @@ Result<MeshId> create_mesh(Renderer& r, std::span<const Vertex> vertices,
     r.meshes.back().items.reserve(1024);
     return static_cast<MeshId>(r.meshes.size() - 1);
 }
+Result<void> prepare_frame(Renderer& r, bool maximum) {
+    return ensure_targets(r, maximum);
+}
 Result<void> render(Renderer& r, Vec3 eye, Vec3 target, float time, bool maximum) {
     if (auto result = ensure_targets(r, maximum); !result)
         return result;
     auto& frame = r.frames[r.frame_index];
-    VK_CHECK(vkWaitForFences(r.device, 1, &frame.fence, VK_TRUE, kWaitForever));
+    VK_CHECK(vkWaitForFences(r.device, 1, &frame.fence, VK_TRUE, kFrameTimeout));
     collect_timing(r, r.frame_index);
     if (r.window) {
-        auto acquired = vkAcquireNextImageKHR(r.device, r.swapchain, kWaitForever, frame.acquired,
+        auto acquired = vkAcquireNextImageKHR(r.device, r.swapchain, kFrameTimeout, frame.acquired,
                                               VK_NULL_HANDLE, &r.image_index);
         if (acquired == VK_ERROR_OUT_OF_DATE_KHR) {
             r.recreate_surface = true;
             if (auto result = ensure_targets(r, maximum); !result)
                 return result;
-            acquired = vkAcquireNextImageKHR(r.device, r.swapchain, kWaitForever, frame.acquired,
+            acquired = vkAcquireNextImageKHR(r.device, r.swapchain, kFrameTimeout, frame.acquired,
                                              VK_NULL_HANDLE, &r.image_index);
         }
         if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR)
             return fail("Cannot acquire a Vulkan surface image", acquired);
-        r.recreate_surface = acquired == VK_SUBOPTIMAL_KHR;
+        // With compositor rotation, SUBOPTIMAL alone need not mean the window
+        // dimensions changed. Recreating on every such frame would churn targets.
     }
     Globals globals{
         perspective(42 * kPi / 180, float(r.width) / r.height, .15f, 80) * look_at(eye, target),
@@ -1438,9 +1473,9 @@ Result<void> present(Renderer& r) {
         present.pSwapchains = &r.swapchain;
         present.pImageIndices = &r.image_index;
         auto result = vkQueuePresentKHR(r.queue, &present);
-        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+        if (result == VK_ERROR_OUT_OF_DATE_KHR)
             r.recreate_surface = true;
-        else if (result != VK_SUCCESS)
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
             return fail("Cannot present the Vulkan frame", result);
     }
     return {};
@@ -1448,7 +1483,7 @@ Result<void> present(Renderer& r) {
 Result<void> wait_frame(Renderer& r) {
     if (!r.has_frame)
         return fail("No Vulkan frame has been submitted");
-    VK_CHECK(vkWaitForFences(r.device, 1, &r.frames[r.last_frame].fence, VK_TRUE, kWaitForever));
+    VK_CHECK(vkWaitForFences(r.device, 1, &r.frames[r.last_frame].fence, VK_TRUE, kFrameTimeout));
     collect_timing(r, r.last_frame);
     return {};
 }

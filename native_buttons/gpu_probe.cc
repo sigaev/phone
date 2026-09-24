@@ -12,6 +12,25 @@
 #include <cstring>
 #include <vector>
 
+#if defined(NATIVE_BUTTONS_TEST_DEPTH_FALLBACK)
+#include <vulkan/vulkan.h>
+extern "C" VkResult __real_vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice, VkFormat,
+                                                                    VkImageType, VkImageTiling,
+                                                                    VkImageUsageFlags,
+                                                                    VkImageCreateFlags,
+                                                                    VkImageFormatProperties*);
+extern "C" VkResult __wrap_vkGetPhysicalDeviceImageFormatProperties(
+    VkPhysicalDevice physical, VkFormat format, VkImageType type, VkImageTiling tiling,
+    VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* properties) {
+    // Simulate a valid device without D24S8. All other capabilities and rendering
+    // still use the real driver, including the fallback depth/shadow images.
+    if (format == VK_FORMAT_D24_UNORM_S8_UINT)
+        return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    return __real_vkGetPhysicalDeviceImageFormatProperties(physical, format, type, tiling, usage,
+                                                           flags, properties);
+}
+#endif
+
 #include "common/gpu/renderer.h"
 #include "native_buttons/scene.h"
 
@@ -55,7 +74,7 @@ common::Result<void> exercise_renderer() {
         auto scene = native_buttons::create_scene(**renderer);
         if (!scene)
             return std::unexpected(scene.error());
-        std::vector<unsigned char> pixels(size_t(width) * height * 4), previous;
+        std::vector<unsigned char> pixels(size_t(width) * height * 4);
         for (int i = 0; i < 12; ++i) {
             bool maximum = i >= 4 && i < 8;
             auto rendered =
@@ -72,19 +91,45 @@ common::Result<void> exercise_renderer() {
                         darkest = std::min(darkest, int(pixels[byte]));
                         brightest = std::max(brightest, int(pixels[byte]));
                     }
-                if (brightest - darkest < 100 || pixels == previous)
-                    return std::unexpected(
-                        common::Error{"Rendered scene is blank or animation is frozen"});
+                if (brightest - darkest < 100)
+                    return std::unexpected(common::Error{"Rendered scene is blank"});
                 auto stats = gpu::get_stats(**renderer);
                 if (stats.samples != 4 || stats.particles != (maximum ? 65536 : 16384) ||
                     stats.triangles != (maximum ? 869830u : 747078u))
                     return std::unexpected(common::Error{"Scene workload changed unexpectedly"});
-                previous = pixels;
             }
+        }
+        // Compare fixed-quality frames with all UI (including changing GPU timings)
+        // excluded. Equal timestamps must reproduce an image; advancing time must
+        // change it. Long timestamps also exercise the scenery's wrapping logic.
+        for (bool maximum : {false, true}) {
+            auto capture = [&](float time) -> common::Result<void> {
+                if (auto rendered = native_buttons::render_scene(
+                        **scene, time, .34f, maximum, 7, 0, 60, false,
+                        {0, 0, float(width), float(height)}, true, false);
+                    !rendered)
+                    return rendered;
+                return gpu::read_pixels(**renderer, pixels);
+            };
+            if (auto result = capture(120.f); !result)
+                return result;
+            auto reference = pixels;
+            if (auto result = capture(120.f); !result)
+                return result;
+            if (pixels != reference)
+                return std::unexpected(common::Error{"Frozen scene changed without input"});
+            if (auto result = capture(120.5f); !result)
+                return result;
+            size_t changed = 0;
+            for (size_t byte = 0; byte < pixels.size(); ++byte)
+                changed += pixels[byte] != reference[byte];
+            if (changed < pixels.size() / 1000)
+                return std::unexpected(common::Error{"Fixed-quality scene animation is frozen"});
         }
     }
     std::puts(
-        "Vulkan recreation, High/Ultra/High transitions, asynchronous frames and readback passed");
+        "Vulkan recreation, quality transitions, async frames, fixed-quality animation and "
+        "readback passed");
     return {};
 }
 

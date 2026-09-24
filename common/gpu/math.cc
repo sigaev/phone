@@ -27,6 +27,12 @@ Vec3 unit(Vec3 value) {
 bool contains(Rect rect, float x, float y) {
     return x >= rect.x && y >= rect.y && x < rect.x + rect.w && y < rect.y + rect.h;
 }
+float wrap(float value, float period) {
+    float result = std::fmod(value, period);
+    if (result < 0)
+        result += period;
+    return result < period ? result : 0.f;
+}
 Mat4 translation(Vec3 p) {
     Mat4 m;
     m.v[12] = p.x;

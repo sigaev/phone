@@ -7,15 +7,13 @@
 #include <vector>
 
 #include "common/gpu/renderer.h"
+#include "native_buttons/controls.h"
 
 namespace native_buttons {
 using namespace gpu;
 using common::Error;
 using common::Owner;
 using common::Result;
-struct Controls {
-    Rect add, reset, quality, pause;
-};
 struct Scene {
     Renderer* renderer;
     MeshId neck, scarf;
@@ -236,7 +234,7 @@ void build_scene(Scene& scene, float time, bool maximum) {
     for (int side : {-1, 1}) {
         tube(r, {-22, -.01f, side * 1.16f}, {22, -.01f, side * 1.16f}, .035f, {.63f, .66f, .58f});
         for (int i = 0; i < 12; ++i) {
-            float x = std::fmod(i * 3.7f - time * 2.6f + 220.f, 44.f) - 22.f;
+            float x = wrap(i * 3.7f - time * 2.6f + 220.f, 44.f) - 22.f;
             ball(r, {x, -.11f, side * 1.35f}, {.35f, .11f, .22f}, {.21f, .27f, .26f}, i * .7f, .9f);
             if (side < 0) {
                 tube(r, {x, .02f, -1.04f}, {x, .42f, -1.04f}, .025f, {.18f, .26f, .28f});
@@ -247,8 +245,7 @@ void build_scene(Scene& scene, float time, bool maximum) {
     }
     int palms = maximum ? 16 : 9;
     for (int i = 0; i < palms; ++i) {
-        float x = std::fmod(i * 4.7f - time * 2.6f + 200.f, 44.f) - 22.f,
-              z = -3.4f - (i % 3) * 2.3f;
+        float x = wrap(i * 4.7f - time * 2.6f + 200.f, 44.f) - 22.f, z = -3.4f - (i % 3) * 2.3f;
         ball(r, {x, -.23f, z}, {1.4f, .31f, 1.2f}, {.37f, .32f, .18f}, 0, .9f);
         palm(r, x, z, 1.65f + (i % 4) * .24f, time + i);
     }
@@ -275,7 +272,7 @@ Vec3 camera(float time, float yaw, float aspect) {
 }
 
 Controls draw_overlay(Renderer& r, Rect safe, int count, int pressed, float fps, bool maximum,
-                      bool paused) {
+                      bool paused, bool saved) {
     float s = std::min(safe.w / 400.f, safe.h / 720.f), cx = safe.x + safe.w * .5f,
           top = safe.y + 22 * s, bottom = safe.y + safe.h;
     Color text{.92f, .96f, .97f}, muted{.58f, .72f, .77f}, mint{.49f, .94f, .76f};
@@ -292,9 +289,7 @@ Controls draw_overlay(Renderer& r, Rect safe, int count, int pressed, float fps,
     else
         std::snprintf(stats, sizeof(stats), "%s", get_device(r).data());
     draw_text(r, stats, cx + 123 * s, top + 37 * s, 12 * s, muted, true);
-    Controls controls;
-    controls.quality = {cx - 170 * s, top + 119 * s, 114 * s, 33 * s};
-    controls.pause = {cx - 46 * s, top + 119 * s, 84 * s, 33 * s};
+    Controls controls = layout_controls(safe);
     draw_rect(r, controls.quality, 16 * s,
               pressed == 3 ? Color{.18f, .36f, .36f, .95f} : Color{.06f, .16f, .20f, .86f});
     draw_text(r, maximum ? "ULTRA DETAIL" : "HIGH DETAIL", cx - 113 * s, top + 141 * s, 13 * s,
@@ -309,12 +304,11 @@ Controls draw_overlay(Renderer& r, Rect safe, int count, int pressed, float fps,
     char number[24];
     std::snprintf(number, sizeof(number), "%d", count);
     draw_text(r, number, cx - 160 * s, panel.y + 70 * s, 43 * s, text);
-    draw_text(r, "Saved automatically", cx + 91 * s, panel.y + 36 * s, 13 * s, muted, true);
+    draw_text(r, saved ? "Saved automatically" : "Not saved - try again", cx + 91 * s,
+              panel.y + 36 * s, 13 * s, saved ? muted : Color{1.f, .65f, .4f}, true);
     std::snprintf(stats, sizeof(stats), "%dx MSAA / %s", get_stats(r).samples,
                   maximum ? "130%" : "100%");
     draw_text(r, stats, cx + 91 * s, panel.y + 57 * s, 12 * s, muted, true);
-    controls.add = {cx - 160 * s, panel.y + 88 * s, 220 * s, 48 * s};
-    controls.reset = {cx + 72 * s, panel.y + 88 * s, 88 * s, 48 * s};
     draw_rect(r, controls.add, 16 * s, pressed == 1 ? Color{.28f, .70f, .56f} : mint);
     draw_text(r, "+  Add one", cx - 50 * s, panel.y + 119 * s, 22 * s, {.035f, .15f, .14f}, true);
     draw_rect(r, controls.reset, 16 * s,
@@ -394,27 +388,22 @@ void destroy(Scene* scene) noexcept {
     delete scene;
 }
 int hit_test(const Scene& scene, float x, float y) {
-    const auto& c = scene.controls;
-    if (contains(c.add, x, y))
-        return 1;
-    if (contains(c.reset, x, y))
-        return 2;
-    if (contains(c.quality, x, y))
-        return 3;
-    if (contains(c.pause, x, y))
-        return 4;
-    return 0;
+    return static_cast<int>(hit_test(scene.controls, x, y));
 }
 Result<void> render_scene(Scene& scene, float time, float yaw, bool maximum, int count, int pressed,
-                          float fps, bool paused, Rect safe) {
+                          float fps, bool paused, Rect safe, bool saved, bool overlay) {
     Renderer& r = *scene.renderer;
+    if (auto result = prepare_frame(r, maximum); !result)
+        return result;
     build_scene(scene, time, maximum);
     auto stats = get_stats(r);
+    safe = safe_area(safe, stats.width, stats.height);
     if (auto result = render(r, camera(time, yaw, float(stats.width) / stats.height), {0, 1.25f, 0},
                              time, maximum);
         !result)
         return std::unexpected(result.error());
-    scene.controls = draw_overlay(r, safe, count, pressed, fps, maximum, paused);
+    scene.controls = overlay ? draw_overlay(r, safe, count, pressed, fps, maximum, paused, saved)
+                             : layout_controls(safe);
     return present(r);
 }
 }  // namespace native_buttons
