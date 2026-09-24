@@ -3,7 +3,7 @@
 The [native_buttons app](native_buttons/README.md) lives in `native_buttons/`.
 Shared code and build infrastructure stay outside app directories:
 
-- `common/` provides shared ownership and error handling helpers.
+- `common/` provides shared ownership, error handling, and Android runtime support.
 - `common/gpu/` provides the shared EGL/OpenGL ES 3.2 renderer, mesh primitives,
   shadows, HDR, bloom, compute particles, and GPU text drawing.
 - `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform.
@@ -12,6 +12,12 @@ Shared code and build infrastructure stay outside app directories:
   for native apps to share C++23 compiler settings and Android linker flags.
 - stb is fetched by Bazel from a pinned upstream commit, verified by SHA-256,
   and exposed as `@stb//:stb_truetype`. No third-party sources are vendored.
+- libc++ sources are fetched from the LLVM revision recorded in NDK r29's
+  `clang_source_info.md`, with a SHA-256 for every file. The
+  `tools/libcxx.BUILD.bazel` overlay compiles the runtime components needed by
+  the apps against the pinned NDK headers, with exceptions, RTTI, and unwind
+  generation disabled. Add any additional compiled standard-library facilities
+  to this overlay as apps need them.
 
 Build the app from the workspace root:
 
@@ -23,9 +29,26 @@ The APK is `bazel-bin/native_buttons/native_buttons.apk`. Bazel compiles, links,
 packages, aligns, and signs it, including on a fresh checkout. There are no
 build wrapper scripts, project `genrule` targets, or manually generated keys.
 
+`//common:support` selects this libc++ runtime for Android. The build disables
+the NDK's prebuilt C++ runtime and unwinder. `tools/no_unwind.ld` discards leftover
+unwind tables from startup objects and rejects exception, unwinding, or demangler
+entry points at link time. Recoverable application errors use `std::expected`;
+`std::nothrow` allocations return null on failure, while ordinary allocation
+failure and standard-library contract failures abort directly.
+
 Use `clang-format` with the checked-in `.clang-format` for C++ and embedded
 shaders, and `buildifier` for Bazel/Starlark files. Both are mandatory; see
 [AGENTS.md](AGENTS.md) for formatting checks and the C++ API conventions.
+
+Check the runtime on this phone with:
+
+```sh
+bazel test //common:runtime_test --platforms=//:arm64-v8a --run_under=//tools:android_test_runner
+```
+
+The test checks allocation failure, allocator handlers, alignment, standard-library
+operations, and direct aborts for unrecoverable errors. Bazel generates the Android
+test runner; no preparation script is needed.
 
 ## Toolchain setup
 

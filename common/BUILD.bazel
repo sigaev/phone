@@ -1,4 +1,20 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tools:android.bzl", "ANDROID_COPTS")
+
+cc_test(
+    name = "runtime_test",
+    size = "small",
+    srcs = ["runtime_test.cc"],
+    copts = ANDROID_COPTS + ["-fno-assume-sane-operator-new"],
+    linkopts = [
+        "-Wl,--wrap=malloc",
+        "-Wl,--wrap=posix_memalign",
+    ],
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [":support"],
+)
 
 cc_library(
     name = "support",
@@ -7,4 +23,8 @@ cc_library(
         "result.h",
     ],
     visibility = ["//visibility:public"],
+    deps = select({
+        "@platforms//os:android": ["@libcxx_runtime//:runtime"],
+        "//conditions:default": [],
+    }),
 )

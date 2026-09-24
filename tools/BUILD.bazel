@@ -1,4 +1,14 @@
+load(":android.bzl", "android_test_runner")
+
+android_test_runner(
+    name = "android_test_runner",
+    visibility = ["//visibility:public"],
+)
+
 exports_files([
     "android.bzl",
+    "libcxx.BUILD.bazel",
+    "libcxx.bzl",
+    "no_unwind.ld",
     "stb.BUILD.bazel",
 ])

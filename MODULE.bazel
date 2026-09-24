@@ -5,6 +5,12 @@ module(
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
+libcxx_runtime = use_repo_rule("//tools:libcxx.bzl", "libcxx_runtime")
+
+libcxx_runtime(
+    name = "libcxx_runtime",
+)
+
 http_archive(
     name = "stb",
     build_file = "//tools:stb.BUILD.bazel",

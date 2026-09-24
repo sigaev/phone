@@ -43,7 +43,13 @@ Output: `bazel-bin/native_buttons/native_buttons.apk`.
 and shared renderer. `alwayslink`
 preserves the dynamically discovered `ANativeActivity_onCreate` entry point.
 Compiler and linker flags come from `//tools:android.bzl`, including
-C++23 and 16 KiB ELF segment alignment. The `native_buttons`
+C++23, full symbol stripping, and 16 KiB ELF segment alignment.
+`//common:support` links libc++ runtime sources built by Bazel without exceptions,
+RTTI, or unwind tables. The prebuilt NDK C++ runtime, libc++abi, libunwind, and
+demangler are excluded. `std::nothrow` allocation still returns null on failure;
+ordinary allocation failure and standard-library contract failures abort.
+Application errors continue to propagate through `std::expected`.
+The `native_buttons`
 `android_binary` links `libnative_buttons.so`, processes the manifest, and
 packages, aligns, and signs the APK. The manifest's `android.app.lib_name`
 matches the shared library. The application ID is `dev.demo.nativebuttons`;

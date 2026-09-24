@@ -1,0 +1,30 @@
+load("@//tools:android.bzl", "ANDROID_COPTS", "ANDROID_LINKOPTS")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Compile the runtime components used by our apps against the pinned NDK headers.
+# Additional standard-library facilities must be added here, never taken from
+# the NDK's exception-enabled prebuilt libc++ or libc++abi archives.
+cc_library(
+    name = "runtime",
+    srcs = [
+        "src/chrono.cpp",
+        "src/new.cpp",
+        "src/new_handler.cpp",
+        "src/new_helpers.cpp",
+        "src/string.cpp",
+        "src/system_error.cpp",
+        "src/verbose_abort.cpp",
+    ],
+    hdrs = [
+        "src/include/apple_availability.h",
+        "src/include/atomic_support.h",
+        "src/include/config_elast.h",
+        "src/include/overridable_function.h",
+    ],
+    additional_linker_inputs = ["@//tools:no_unwind.ld"],
+    copts = ANDROID_COPTS + ["-D_LIBCPP_BUILDING_LIBRARY"],
+    includes = ["src"],
+    linkopts = ANDROID_LINKOPTS + ["-Wl,--script=$(location @//tools:no_unwind.ld)"],
+    target_compatible_with = ["@platforms//os:android"],
+    visibility = ["//visibility:public"],
+)

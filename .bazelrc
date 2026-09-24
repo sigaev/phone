@@ -16,6 +16,9 @@ build --android_platforms=//:arm64-v8a
 build -c opt
 build --strip=always
 
+# Android links the exception-free libc++ runtime declared in //common:support.
+build --features=-static_link_cpp_runtimes
+
 # rules_android's build-time Java tools require Java 17.
 build --java_language_version=17
 build --java_runtime_version=remotejdk_17
