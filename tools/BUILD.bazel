@@ -1,1 +1,4 @@
-exports_files(["android.bzl"])
+exports_files([
+    "android.bzl",
+    "stb.BUILD.bazel",
+])

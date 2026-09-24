@@ -1,19 +1,39 @@
 load("@rules_android//rules:rules.bzl", "android_binary")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tools:android.bzl", "ANDROID_COPTS", "ANDROID_LINKOPTS")
 
 package(default_visibility = ["//visibility:private"])
 
 cc_library(
+    name = "scene",
+    srcs = [
+        "scene.cc",
+        "shaders.cc",
+    ],
+    hdrs = ["scene.h"],
+    copts = ANDROID_COPTS,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [
+        "//common:support",
+        "//common/gpu",
+    ],
+)
+
+cc_library(
     name = "native_buttons_lib",
     srcs = ["main.cc"],
     copts = ANDROID_COPTS,
     linkopts = ANDROID_LINKOPTS,
-    # NativeActivity looks up ANativeActivity_onCreate dynamically.
-    alwayslink = True,
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
-    deps = ["//common/stb:stb_truetype"],
+    deps = [
+        ":scene",
+        "//common:support",
+        "//common/gpu",
+    ],
+    # NativeActivity looks up ANativeActivity_onCreate dynamically.
+    alwayslink = True,
 )
 
 android_binary(
@@ -23,4 +43,17 @@ android_binary(
     manifest = "main.xml",
     visibility = ["//visibility:public"],
     deps = [":native_buttons_lib"],
+)
+
+cc_binary(
+    name = "gpu_probe",
+    srcs = ["gpu_probe.cc"],
+    copts = ANDROID_COPTS,
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [
+        ":scene",
+        "//common:support",
+        "//common/gpu",
+    ],
 )

@@ -1,222 +1,335 @@
-#include <android/native_activity.h>
-#include <android/native_window.h>
+#include <android/choreographer.h>
 #include <android/input.h>
-#include <android/looper.h>
 #include <android/log.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
+#include <android/looper.h>
+#include <android/native_activity.h>
+#include <android/window.h>
+#include <dlfcn.h>
 
-#define STB_TRUETYPE_IMPLEMENTATION
-#include "common/stb/stb_truetype.h"
+#include <algorithm>
+#include <cerrno>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <new>
 
-struct Rect {
-    float x, y, w, h;
-    bool contains(float px, float py) const {
-        return px >= x && px < x+w && py >= y && py < y+h;
-    }
-};
+#include "common/gpu/renderer.h"
+#include "native_buttons/scene.h"
+
+namespace {
+using common::Error;
+using common::Owner;
+using common::Result;
 
 struct App {
-    ANativeActivity* activity;
-    ANativeWindow* window;
-    AInputQueue* input;
-    ARect content;
-    stbtt_fontinfo font;
-    unsigned char* fontData;
-    int count, pressed;
-    float scale;
-    Rect add, reset;
+    ANativeActivity* activity = nullptr;
+    AInputQueue* input = nullptr;
+    AChoreographer* choreographer = nullptr;
+    ARect content{};
+    Owner<gpu::Renderer> renderer;
+    Owner<native_buttons::Scene> scene;
+    int count = 0;
+    int pressed = 0;
+    bool resumed = false;
+    bool frame_pending = false;
+    bool destroyed = false;
+    bool maximum = false;
+    bool paused = false;
+    bool dragging = false;
+    float yaw = .34f;
+    float last_x = 0;
+    float last_y = 0;
+    float travel = 0;
+    float time = 0;
+    float fps = 0;
+    long last_frame = 0;
+    double fps_time = 0;
+    unsigned fps_frames = 0;
 };
 
-static uint32_t rgb(unsigned r, unsigned g, unsigned b) {
-    return 0xff000000u | (b << 16) | (g << 8) | r;
+void destroy(App* app) noexcept {
+    delete app;
 }
+App* state(ANativeActivity* activity) {
+    return static_cast<App*>(activity->instance);
+}
+void request_frame(App& app);
 
-struct Canvas {
-    ANativeWindow_Buffer b;
-    void pixel(int x, int y, uint32_t color, unsigned alpha=255) {
-        if (x < 0 || y < 0 || x >= b.width || y >= b.height) return;
-        uint32_t& p = static_cast<uint32_t*>(b.bits)[y*b.stride+x];
-        if (alpha == 255) { p=color; return; }
-        unsigned r=((color&255)*alpha+(p&255)*(255-alpha))/255;
-        unsigned g=(((color>>8)&255)*alpha+((p>>8)&255)*(255-alpha))/255;
-        unsigned bl=(((color>>16)&255)*alpha+((p>>16)&255)*(255-alpha))/255;
-        p=rgb(r,g,bl);
-    }
-    void fill(uint32_t color) {
-        for(int y=0;y<b.height;++y)
-            for(int x=0;x<b.width;++x) pixel(x,y,color);
-    }
-    void rounded(Rect r, float radius, uint32_t color) {
-        int left=(int)r.x, top=(int)r.y;
-        for(int y=top;y<(int)(r.y+r.h);++y) {
-            for(int x=left;x<(int)(r.x+r.w);++x) {
-                float dx=fmaxf(fmaxf(r.x+radius-x, x-(r.x+r.w-radius)),0);
-                float dy=fmaxf(fmaxf(r.y+radius-y, y-(r.y+r.h-radius)),0);
-                float edge=radius-sqrtf(dx*dx+dy*dy);
-                if(edge>=0) pixel(x,y,color,(unsigned)(fminf(edge+0.5f,1)*255));
-            }
-        }
-    }
-    void text(App* app, const char* str, float cx, float baseline, float size, uint32_t color) {
-        if(!app->fontData) return;
-        float scale=stbtt_ScaleForPixelHeight(&app->font,size), width=0;
-        for(const char* c=str;*c;++c) {
-            int advance; stbtt_GetCodepointHMetrics(&app->font,*c,&advance,nullptr);
-            width+=advance*scale;
-            if(c[1]) width+=stbtt_GetCodepointKernAdvance(&app->font,*c,c[1])*scale;
-        }
-        float x=cx-width/2;
-        for(const char* c=str;*c;++c) {
-            int w,h,xoff,yoff,advance;
-            unsigned char* pixels=stbtt_GetCodepointBitmap(&app->font,0,scale,*c,&w,&h,&xoff,&yoff);
-            if(pixels) {
-                for(int j=0;j<h;++j) for(int i=0;i<w;++i)
-                    pixel((int)x+xoff+i,(int)baseline+yoff+j,color,pixels[j*w+i]);
-                stbtt_FreeBitmap(pixels,nullptr);
-            }
-            stbtt_GetCodepointHMetrics(&app->font,*c,&advance,nullptr);
-            x+=advance*scale;
-            if(c[1]) x+=stbtt_GetCodepointKernAdvance(&app->font,*c,c[1])*scale;
-        }
-    }
-};
-
-static void save(App* app) {
+Result<int> load_count(const App& app) {
     char path[1024];
-    snprintf(path,sizeof(path),"%s/count.txt",app->activity->internalDataPath);
-    FILE* file=fopen(path,"w");
-    if(file) { fprintf(file,"%d\n",app->count); fclose(file); }
-}
-
-static void draw(App* app) {
-    if(!app->window) return;
-    Canvas c{};
-    if(ANativeWindow_lock(app->window,&c.b,nullptr)!=0) return;
-    const uint32_t ink=rgb(235,241,252), muted=rgb(153,170,194);
-    c.fill(rgb(14,22,37));
-    float left=0,top=0,right=(float)c.b.width,bottom=(float)c.b.height;
-    if(app->content.right>app->content.left && app->content.bottom>app->content.top) {
-        left=fmaxf(left,(float)app->content.left);
-        top=fmaxf(top,(float)app->content.top);
-        right=fminf(right,(float)app->content.right);
-        bottom=fminf(bottom,(float)app->content.bottom);
+    std::snprintf(path, sizeof(path), "%s/count.txt", app.activity->internalDataPath);
+    FILE* file = std::fopen(path, "r");
+    if (!file) {
+        if (errno == ENOENT)
+            return 0;
+        return std::unexpected(Error{"Cannot read the saved count"});
     }
-    float s=fminf((right-left)/400.0f,(bottom-top)/600.0f);
-    if(s<=0) { ANativeWindow_unlockAndPost(app->window); return; }
-    app->scale=s;
-    float x=(left+right)/2, y=(top+bottom)/2-250*s;
-    c.rounded({x-40*s,y,80*s,28*s},14*s,rgb(31,57,63));
-    c.text(app,"HELLO",x,y+19*s,16*s,rgb(111,230,193));
-    c.text(app,"native_buttons",x,y+82*s,38*s,ink);
-    c.text(app,"A little counter. Give it a tap.",x,y+116*s,19*s,muted);
-    c.rounded({x-164*s,y+151*s,328*s,178*s},24*s,rgb(24,36,55));
-    c.text(app,"YOUR COUNT",x,y+190*s,15*s,muted);
-    char number[24]; snprintf(number,sizeof(number),"%d",app->count);
-    c.text(app,number,x,y+288*s,app->count>9999?78*s:102*s,ink);
-    app->add={x-164*s,y+353*s,328*s,62*s};
-    app->reset={x-164*s,y+431*s,328*s,62*s};
-    c.rounded(app->add,18*s,app->pressed==1?rgb(58,185,152):rgb(109,231,193));
-    c.rounded(app->reset,18*s,app->pressed==2?rgb(52,69,94):rgb(33,48,70));
-    c.text(app,"+  Add one",x,y+392*s,25*s,rgb(12,43,36));
-    c.text(app,"Reset",x,y+470*s,25*s,ink);
-    c.text(app,"Saved automatically",x,y+530*s,16*s,muted);
-    ANativeWindow_unlockAndPost(app->window);
+    int count = 0;
+    int fields = std::fscanf(file, "%d", &count);
+    std::fclose(file);
+    if (fields != 1)
+        return std::unexpected(Error{"The saved count is invalid"});
+    return std::clamp(count, 0, 999999);
 }
-
-static int inputReady(int, int, void* data) {
-    App* app=static_cast<App*>(data);
-    AInputEvent* event=nullptr;
-    while(app->input && AInputQueue_getEvent(app->input,&event)>=0) {
-        if(AInputQueue_preDispatchEvent(app->input,event)) continue;
-        int handled=0;
-        if(AInputEvent_getType(event)==AINPUT_EVENT_TYPE_MOTION) {
-            int action=AMotionEvent_getAction(event)&AMOTION_EVENT_ACTION_MASK;
-            float x=AMotionEvent_getX(event,0),y=AMotionEvent_getY(event,0);
-            int hit=app->add.contains(x,y)?1:app->reset.contains(x,y)?2:0;
-            if(action==AMOTION_EVENT_ACTION_DOWN) app->pressed=hit;
-            else if(action==AMOTION_EVENT_ACTION_UP) {
-                if(app->pressed && hit==app->pressed) {
-                    if(hit==1 && app->count<999999) ++app->count;
-                    if(hit==2) app->count=0;
-                    save(app);
-                }
-                app->pressed=0;
-            } else if(action==AMOTION_EVENT_ACTION_CANCEL || action==AMOTION_EVENT_ACTION_POINTER_DOWN
-                      || (action==AMOTION_EVENT_ACTION_MOVE && hit!=app->pressed)) app->pressed=0;
-            handled=1;
-            draw(app);
+Result<void> save_count(const App& app) {
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/count.txt", app.activity->internalDataPath);
+    FILE* file = std::fopen(path, "w");
+    if (!file)
+        return std::unexpected(Error{"Cannot open the saved count for writing"});
+    int written = std::fprintf(file, "%d\n", app.count);
+    int closed = std::fclose(file);
+    if (written < 0 || closed != 0)
+        return std::unexpected(Error{"Cannot save the count"});
+    return {};
+}
+void save_at_callback_boundary(const App& app) {
+    if (auto result = save_count(app); !result) {
+        __android_log_print(ANDROID_LOG_ERROR, "native_buttons", "%s",
+                            result.error().message.c_str());
+    }
+}
+void report_failure(App& app, const Error& error) {
+    __android_log_print(ANDROID_LOG_ERROR, "native_buttons", "%s", error.message.c_str());
+    JNIEnv* env = app.activity->env;
+    jclass toast = env->FindClass("android/widget/Toast");
+    if (toast) {
+        jmethodID make = env->GetStaticMethodID(
+            toast, "makeText",
+            "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
+        jstring message = env->NewStringUTF(error.message.c_str());
+        if (make && message) {
+            jobject object =
+                env->CallStaticObjectMethod(toast, make, app.activity->clazz, message, 1);
+            if (object) {
+                jmethodID show = env->GetMethodID(toast, "show", "()V");
+                if (show)
+                    env->CallVoidMethod(object, show);
+                env->DeleteLocalRef(object);
+            }
         }
-        AInputQueue_finishEvent(app->input,event,handled);
+        if (message)
+            env->DeleteLocalRef(message);
+        env->DeleteLocalRef(toast);
+    }
+    if (env->ExceptionCheck())
+        env->ExceptionClear();
+    ANativeActivity_finish(app.activity);
+}
+void on_frame(long nanos, void* data) {
+    App& app = *static_cast<App*>(data);
+    app.frame_pending = false;
+    // Native Choreographer callbacks cannot be cancelled. on_destroy transfers
+    // the final owner to this already-scheduled callback, on the same UI thread.
+    if (app.destroyed) {
+        Owner<App> owner(&app);
+        return;
+    }
+    if (!app.resumed || !app.scene)
+        return;
+    double delta = app.last_frame ? double(nanos - app.last_frame) / 1e9 : 1. / 60;
+    app.last_frame = nanos;
+    if (!app.paused)
+        app.time += std::clamp(float(delta), 0.f, .1f);
+    app.fps_time += delta;
+    ++app.fps_frames;
+    if (app.fps_time > .5) {
+        app.fps = app.fps_frames / app.fps_time;
+        app.fps_frames = 0;
+        app.fps_time = 0;
+    }
+    auto stats = gpu::get_stats(*app.renderer);
+    gpu::Rect safe{0, 0, float(stats.width), float(stats.height)};
+    if (app.content.right > app.content.left && app.content.bottom > app.content.top) {
+        float left = std::clamp(float(app.content.left), 0.f, safe.w);
+        float top = std::clamp(float(app.content.top), 0.f, safe.h);
+        safe = {left, top, std::clamp(float(app.content.right), left, safe.w) - left,
+                std::clamp(float(app.content.bottom), top, safe.h) - top};
+    }
+    auto result = native_buttons::render_scene(*app.scene, app.time, app.yaw, app.maximum,
+                                               app.count, app.pressed, app.fps, app.paused, safe);
+    if (!result) {
+        report_failure(app, result.error());
+        return;
+    }
+    request_frame(app);
+}
+void request_frame(App& app) {
+    if (app.resumed && app.scene && !app.destroyed && !app.frame_pending) {
+        app.frame_pending = true;
+        AChoreographer_postFrameCallback(app.choreographer, on_frame, &app);
+    }
+}
+int on_input_ready(int, int, void* data) {
+    App& app = *static_cast<App*>(data);
+    AInputEvent* event = nullptr;
+    while (app.input && AInputQueue_getEvent(app.input, &event) >= 0) {
+        if (AInputQueue_preDispatchEvent(app.input, event))
+            continue;
+        int handled = 0;
+        if (app.scene && AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION) {
+            int action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
+            float x = AMotionEvent_getX(event, 0), y = AMotionEvent_getY(event, 0);
+            int hit = native_buttons::hit_test(*app.scene, x, y);
+            if (action == AMOTION_EVENT_ACTION_DOWN) {
+                app.pressed = hit;
+                app.dragging = hit == 0;
+                app.last_x = x;
+                app.last_y = y;
+                app.travel = 0;
+            } else if (action == AMOTION_EVENT_ACTION_MOVE) {
+                float dx = x - app.last_x, dy = y - app.last_y;
+                app.travel += std::fabs(dx) + std::fabs(dy);
+                if (app.dragging) {
+                    int width = gpu::get_stats(*app.renderer).width;
+                    app.yaw =
+                        std::remainder(app.yaw - dx / std::max(1, width) * gpu::kPi, 2 * gpu::kPi);
+                }
+                if (hit != app.pressed)
+                    app.pressed = 0;
+                app.last_x = x;
+                app.last_y = y;
+            } else if (action == AMOTION_EVENT_ACTION_UP) {
+                if (app.pressed && hit == app.pressed && app.travel < 30) {
+                    if (hit == 1 && app.count < 999999) {
+                        ++app.count;
+                        save_at_callback_boundary(app);
+                    } else if (hit == 2) {
+                        app.count = 0;
+                        save_at_callback_boundary(app);
+                    } else if (hit == 3) {
+                        app.maximum = !app.maximum;
+                    } else if (hit == 4) {
+                        app.paused = !app.paused;
+                    }
+                }
+                app.pressed = 0;
+                app.dragging = false;
+            } else if (action == AMOTION_EVENT_ACTION_CANCEL ||
+                       action == AMOTION_EVENT_ACTION_POINTER_DOWN) {
+                app.pressed = 0;
+                app.dragging = false;
+            }
+            handled = 1;
+        }
+        AInputQueue_finishEvent(app.input, event, handled);
     }
     return 1;
 }
-
-static App* state(ANativeActivity* a) { return static_cast<App*>(a->instance); }
-static void windowCreated(ANativeActivity* a, ANativeWindow* window) {
-    state(a)->window=window;
-    ANativeWindow_setBuffersGeometry(window,0,0,WINDOW_FORMAT_RGBA_8888);
-    draw(state(a));
-}
-static void windowDestroyed(ANativeActivity* a, ANativeWindow*) { state(a)->window=nullptr; }
-static void windowRedraw(ANativeActivity* a, ANativeWindow*) { draw(state(a)); }
-static void inputCreated(ANativeActivity* a,AInputQueue* input) {
-    state(a)->input=input;
-    AInputQueue_attachLooper(input,ALooper_forThread(),ALOOPER_POLL_CALLBACK,inputReady,state(a));
-}
-static void inputDestroyed(ANativeActivity* a,AInputQueue* input) {
-    AInputQueue_detachLooper(input); state(a)->input=nullptr; state(a)->pressed=0;
-}
-static void contentChanged(ANativeActivity* a,const ARect* rect) {
-    state(a)->content=*rect; draw(state(a));
-}
-static void pauseApp(ANativeActivity* a) { state(a)->pressed=0; save(state(a)); }
-static void resumeApp(ANativeActivity* a) { draw(state(a)); }
-static void destroy(ANativeActivity* a) {
-    App* app=state(a); save(app); free(app->fontData); free(app); a->instance=nullptr;
-}
-static void* saveState(ANativeActivity* a,size_t* size) {
-    int* count=static_cast<int*>(malloc(sizeof(int)));
-    if(!count) { *size=0; return nullptr; }
-    *count=state(a)->count; *size=sizeof(int); return count;
-}
-
-extern "C" __attribute__((visibility("default")))
-void ANativeActivity_onCreate(ANativeActivity* activity,void* saved,size_t savedSize) {
-    App* app=static_cast<App*>(calloc(1,sizeof(App)));
-    if(!app) { ANativeActivity_finish(activity); return; }
-    activity->instance=app; app->activity=activity;
-    const char* fonts[]={"/system/fonts/RobotoStatic-Regular.ttf","/system/fonts/Roboto-Regular.ttf"};
-    for(const char* path:fonts) {
-        FILE* file=fopen(path,"rb"); if(!file) continue;
-        fseek(file,0,SEEK_END); long length=ftell(file); rewind(file);
-        if(length>0 && length<16000000) {
-            app->fontData=static_cast<unsigned char*>(malloc(length));
-            if(app->fontData && fread(app->fontData,1,length,file)==(size_t)length
-               && stbtt_InitFont(&app->font,app->fontData,stbtt_GetFontOffsetForIndex(app->fontData,0))) {
-                fclose(file); break;
-            }
-            free(app->fontData); app->fontData=nullptr;
-        }
-        fclose(file);
+void on_window_created(ANativeActivity* activity, ANativeWindow* window) {
+    App& app = *state(activity);
+    auto renderer = gpu::create_renderer(window, native_buttons::get_scene_shaders());
+    if (!renderer) {
+        report_failure(app, renderer.error());
+        return;
     }
-    if(!app->fontData) {
-        __android_log_print(ANDROID_LOG_ERROR,"native_buttons","No readable system font");
-        free(app); activity->instance=nullptr; ANativeActivity_finish(activity); return;
+    app.renderer = std::move(*renderer);
+    auto scene = native_buttons::create_scene(*app.renderer);
+    if (!scene) {
+        report_failure(app, scene.error());
+        return;
     }
-    char path[1024]; snprintf(path,sizeof(path),"%s/count.txt",activity->internalDataPath);
-    FILE* file=fopen(path,"r");
-    if(file) { if(fscanf(file,"%d",&app->count)!=1) app->count=0; fclose(file); }
-    if(saved && savedSize==sizeof(int)) memcpy(&app->count,saved,sizeof(int));
-    if(app->count<0 || app->count>999999) app->count=0;
-    auto* cb=activity->callbacks;
-    cb->onNativeWindowCreated=windowCreated; cb->onNativeWindowDestroyed=windowDestroyed;
-    cb->onNativeWindowResized=windowRedraw; cb->onNativeWindowRedrawNeeded=windowRedraw;
-    cb->onInputQueueCreated=inputCreated; cb->onInputQueueDestroyed=inputDestroyed;
-    cb->onContentRectChanged=contentChanged; cb->onDestroy=destroy;
-    cb->onPause=pauseApp; cb->onResume=resumeApp; cb->onSaveInstanceState=saveState;
-    __android_log_print(ANDROID_LOG_INFO,"native_buttons","C++ activity created, count=%d",app->count);
+    app.scene = std::move(*scene);
+    // This optional Android 11 API keeps the API-26 minimum valid.
+    using SetRate = int (*)(ANativeWindow*, float, int8_t);
+    auto set_rate = reinterpret_cast<SetRate>(dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate"));
+    if (set_rate)
+        set_rate(window, 60.f, 0);
+    request_frame(app);
+}
+void on_window_destroyed(ANativeActivity* activity, ANativeWindow*) {
+    App& app = *state(activity);
+    app.scene.reset();
+    app.renderer.reset();
+    app.last_frame = 0;
+}
+void on_window_redraw(ANativeActivity* activity, ANativeWindow*) {
+    request_frame(*state(activity));
+}
+void on_input_created(ANativeActivity* activity, AInputQueue* input) {
+    App& app = *state(activity);
+    app.input = input;
+    AInputQueue_attachLooper(input, ALooper_forThread(), ALOOPER_POLL_CALLBACK, on_input_ready,
+                             &app);
+}
+void on_input_destroyed(ANativeActivity* activity, AInputQueue* input) {
+    AInputQueue_detachLooper(input);
+    App& app = *state(activity);
+    app.input = nullptr;
+    app.pressed = 0;
+    app.dragging = false;
+}
+void on_content_changed(ANativeActivity* activity, const ARect* rect) {
+    state(activity)->content = *rect;
+}
+void on_pause(ANativeActivity* activity) {
+    App& app = *state(activity);
+    app.resumed = false;
+    app.last_frame = 0;
+    app.pressed = 0;
+    save_at_callback_boundary(app);
+}
+void on_resume(ANativeActivity* activity) {
+    App& app = *state(activity);
+    app.resumed = true;
+    app.last_frame = 0;
+    request_frame(app);
+}
+void on_destroy(ANativeActivity* activity) {
+    Owner<App> app(state(activity));
+    save_at_callback_boundary(*app);
+    app->destroyed = true;
+    app->scene.reset();
+    app->renderer.reset();
+    activity->instance = nullptr;
+    if (app->frame_pending)
+        app.release();
+}
+void* on_save_state(ANativeActivity* activity, size_t* size) {
+    // NativeActivity owns this malloc allocation after the callback returns.
+    int* count = static_cast<int*>(std::malloc(sizeof(int)));
+    if (!count) {
+        *size = 0;
+        return nullptr;
+    }
+    *count = state(activity)->count;
+    *size = sizeof(int);
+    return count;
+}
+}  // namespace
+
+extern "C" __attribute__((visibility("default"))) void ANativeActivity_onCreate(
+    ANativeActivity* activity, void* saved, size_t size) {
+    Owner<App> app(new (std::nothrow) App);
+    if (!app) {
+        ANativeActivity_finish(activity);
+        return;
+    }
+    app->activity = activity;
+    app->choreographer = AChoreographer_getInstance();
+    if (auto count = load_count(*app); count) {
+        app->count = *count;
+    } else {
+        __android_log_print(ANDROID_LOG_WARN, "native_buttons", "%s",
+                            count.error().message.c_str());
+    }
+    if (saved && size == sizeof(int))
+        std::memcpy(&app->count, saved, sizeof(int));
+    app->count = std::clamp(app->count, 0, 999999);
+    auto* callbacks = activity->callbacks;
+    callbacks->onNativeWindowCreated = on_window_created;
+    callbacks->onNativeWindowDestroyed = on_window_destroyed;
+    callbacks->onNativeWindowResized = on_window_redraw;
+    callbacks->onNativeWindowRedrawNeeded = on_window_redraw;
+    callbacks->onInputQueueCreated = on_input_created;
+    callbacks->onInputQueueDestroyed = on_input_destroyed;
+    callbacks->onContentRectChanged = on_content_changed;
+    callbacks->onPause = on_pause;
+    callbacks->onResume = on_resume;
+    callbacks->onDestroy = on_destroy;
+    callbacks->onSaveInstanceState = on_save_state;
+    activity->instance = app.release();  // Ownership returns through on_destroy.
+    ANativeActivity_setWindowFlags(activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0);
+    __android_log_print(ANDROID_LOG_INFO, "native_buttons", "3D pelican scene created");
 }

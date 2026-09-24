@@ -1,7 +1,10 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 cc_library(
-    name = "stb_truetype",
-    hdrs = ["stb_truetype.h"],
+    name = "support",
+    hdrs = [
+        "owner.h",
+        "result.h",
+    ],
     visibility = ["//visibility:public"],
 )

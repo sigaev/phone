@@ -1,18 +1,34 @@
-module(name = "native_buttons", version = "1.0")
+module(
+    name = "native_buttons",
+    version = "1.0",
+)
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "stb",
+    build_file = "//tools:stb.BUILD.bazel",
+    sha256 = "50417aaef6436990c7931860b858f03427cc3d62279425dd13b3cfef091ea15f",
+    strip_prefix = "stb-6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760",
+    type = "tar.gz",
+    urls = ["https://codeload.github.com/nothings/stb/tar.gz/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760"],
+)
 
 bazel_dep(name = "hermetic_android_toolchains", version = "0.4.0", dev_dependency = True)
+
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_android", version = "0.7.3")
 bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 bazel_dep(name = "rules_cc", version = "0.2.17")
+
 bazel_dep(name = "rules_jvm_external", version = "7.0", dev_dependency = True)
 
 # Adapt upstream's Linux x86-64 host layout to the pinned ARM64 archives.
 single_version_override(
     module_name = "hermetic_android_toolchains",
-    version = "0.4.0",
-    patches = ["//tools/patches:hermetic_android_arm64.patch"],
     patch_strip = 1,
+    patches = ["//tools/patches:hermetic_android_arm64.patch"],
+    version = "0.4.0",
 )
 
 # Use upstream's pinned Java dependencies instead of live Maven resolution.
@@ -34,24 +50,24 @@ use_repo(maven, "rules_android_maven")
 
 android = use_extension("@hermetic_android_toolchains//:extensions.bzl", "android", dev_dependency = True)
 android.sdk(
-    version = "35",
     api_level = "35",
-    build_tools_version = "35.0.0",
-    build_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz"},
     build_tools_sha256s = {"linux": "460544cb43f7208276cd41b7b3ed0ccc72a33700378c0fd3f5c07405fae4f82e"},
     build_tools_strip_prefixes = {"linux": "android-sdk/build-tools/35.0.0"},
-    platform_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz"},
+    build_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz"},
+    build_tools_version = "35.0.0",
     platform_tools_sha256s = {"linux": "460544cb43f7208276cd41b7b3ed0ccc72a33700378c0fd3f5c07405fae4f82e"},
     platform_tools_strip_prefixes = {"linux": "android-sdk/platform-tools"},
-    platforms_url = "https://dl.google.com/android/repository/platform-35_r02.zip",
+    platform_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz"},
     platforms_sha256 = "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0",
+    platforms_url = "https://dl.google.com/android/repository/platform-35_r02.zip",
+    version = "35",
 )
 android.ndk(
-    version = "r29",
     api_level = 26,
-    urls = {"linux": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz"},
     sha256s = {"linux": "fcc3b0ba65318317899fc296df0c5795d472a0cc3870b6fbf659939c1dde63ca"},
     strip_prefix = "android-ndk-r29",
+    urls = {"linux": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz"},
+    version = "r29",
 )
 use_repo(android, "androidndk", "androidsdk")
 
@@ -61,6 +77,7 @@ rules_android_sdk = use_extension(
     "android_sdk_repository_extension",
     dev_dependency = True,
 )
+
 override_repo(rules_android_sdk, "androidsdk")
 
 rules_android_ndk = use_extension(
@@ -68,6 +85,11 @@ rules_android_ndk = use_extension(
     "android_ndk_repository_extension",
     dev_dependency = True,
 )
+
 override_repo(rules_android_ndk, "androidndk")
 
-register_toolchains("@androidndk//:all", "@androidsdk//:all", dev_dependency = True)
+register_toolchains(
+    "@androidndk//:all",
+    "@androidsdk//:all",
+    dev_dependency = True,
+)

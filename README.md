@@ -3,11 +3,15 @@
 The [native_buttons app](native_buttons/README.md) lives in `native_buttons/`.
 Shared code and build infrastructure stay outside app directories:
 
-- `common/stb/` provides the shared `//common/stb:stb_truetype` C++ library.
+- `common/` provides shared ownership and error handling helpers.
+- `common/gpu/` provides the shared EGL/OpenGL ES 3.2 renderer, mesh primitives,
+  shadows, HDR, bloom, compute particles, and GPU text drawing.
 - `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform.
 - `MODULE.bazel`, `.bazelrc`, and `tools/` configure the toolchains.
 - `tools/android.bzl` exports `ANDROID_COPTS` and `ANDROID_LINKOPTS`
   for native apps to share C++23 compiler settings and Android linker flags.
+- stb is fetched by Bazel from a pinned upstream commit, verified by SHA-256,
+  and exposed as `@stb//:stb_truetype`. No third-party sources are vendored.
 
 Build the app from the workspace root:
 
@@ -18,6 +22,10 @@ bazel build //native_buttons
 The APK is `bazel-bin/native_buttons/native_buttons.apk`. Bazel compiles, links,
 packages, aligns, and signs it, including on a fresh checkout. There are no
 build wrapper scripts, project `genrule` targets, or manually generated keys.
+
+Use `clang-format` with the checked-in `.clang-format` for C++ and embedded
+shaders, and `buildifier` for Bazel/Starlark files. Both are mandatory; see
+[AGENTS.md](AGENTS.md) for formatting checks and the C++ API conventions.
 
 ## Toolchain setup
 

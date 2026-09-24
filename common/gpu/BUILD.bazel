@@ -1,0 +1,25 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//tools:android.bzl", "ANDROID_COPTS", "ANDROID_LINKOPTS")
+
+cc_library(
+    name = "gpu",
+    srcs = [
+        "math.cc",
+        "renderer.cc",
+    ],
+    hdrs = [
+        "math.h",
+        "renderer.h",
+    ],
+    copts = ANDROID_COPTS,
+    linkopts = ANDROID_LINKOPTS + [
+        "-lEGL",
+        "-lGLESv3",
+    ],
+    target_compatible_with = ["@platforms//os:android"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//common:support",
+        "@stb//:stb_truetype",
+    ],
+)
