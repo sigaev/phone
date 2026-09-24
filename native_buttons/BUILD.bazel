@@ -1,0 +1,26 @@
+load("@rules_android//rules:rules.bzl", "android_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//tools:android.bzl", "ANDROID_COPTS", "ANDROID_LINKOPTS")
+
+package(default_visibility = ["//visibility:private"])
+
+cc_library(
+    name = "native_buttons_lib",
+    srcs = ["main.cc"],
+    copts = ANDROID_COPTS,
+    linkopts = ANDROID_LINKOPTS,
+    # NativeActivity looks up ANativeActivity_onCreate dynamically.
+    alwayslink = True,
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = ["//common/stb:stb_truetype"],
+)
+
+android_binary(
+    name = "native_buttons",
+    custom_package = "dev.demo.nativebuttons",
+    generate_art_profile = False,
+    manifest = "main.xml",
+    visibility = ["//visibility:public"],
+    deps = [":native_buttons_lib"],
+)

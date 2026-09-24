@@ -1,0 +1,73 @@
+module(name = "native_buttons", version = "1.0")
+
+bazel_dep(name = "hermetic_android_toolchains", version = "0.4.0", dev_dependency = True)
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_android", version = "0.7.3")
+bazel_dep(name = "rules_android_ndk", version = "0.1.5")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_jvm_external", version = "7.0", dev_dependency = True)
+
+# Adapt upstream's Linux x86-64 host layout to the pinned ARM64 archives.
+single_version_override(
+    module_name = "hermetic_android_toolchains",
+    version = "0.4.0",
+    patches = ["//tools/patches:hermetic_android_arm64.patch"],
+    patch_strip = 1,
+)
+
+# Use upstream's pinned Java dependencies instead of live Maven resolution.
+# https://github.com/bazelbuild/rules_android/issues/485
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven", dev_dependency = True)
+maven.install(
+    name = "rules_android_maven",
+    aar_import_bzl_label = "@rules_android//rules:rules.bzl",
+    artifacts = [],
+    known_contributing_modules = ["rules_android"],
+    lock_file = "@hermetic_android_toolchains//:rules_android_maven_install.json",
+    repositories = [
+        "https://maven.google.com",
+        "https://repo1.maven.org/maven2",
+    ],
+    use_starlark_android_rules = True,
+)
+use_repo(maven, "rules_android_maven")
+
+android = use_extension("@hermetic_android_toolchains//:extensions.bzl", "android", dev_dependency = True)
+android.sdk(
+    version = "35",
+    api_level = "35",
+    build_tools_version = "35.0.0",
+    build_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz"},
+    build_tools_sha256s = {"linux": "460544cb43f7208276cd41b7b3ed0ccc72a33700378c0fd3f5c07405fae4f82e"},
+    build_tools_strip_prefixes = {"linux": "android-sdk/build-tools/35.0.0"},
+    platform_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz"},
+    platform_tools_sha256s = {"linux": "460544cb43f7208276cd41b7b3ed0ccc72a33700378c0fd3f5c07405fae4f82e"},
+    platform_tools_strip_prefixes = {"linux": "android-sdk/platform-tools"},
+    platforms_url = "https://dl.google.com/android/repository/platform-35_r02.zip",
+    platforms_sha256 = "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0",
+)
+android.ndk(
+    version = "r29",
+    api_level = 26,
+    urls = {"linux": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz"},
+    sha256s = {"linux": "fcc3b0ba65318317899fc296df0c5795d472a0cc3870b6fbf659939c1dde63ca"},
+    strip_prefix = "android-ndk-r29",
+)
+use_repo(android, "androidndk", "androidsdk")
+
+# Route the Android rules' SDK/NDK dependencies to the downloaded toolchains.
+rules_android_sdk = use_extension(
+    "@rules_android//rules/android_sdk_repository:rule.bzl",
+    "android_sdk_repository_extension",
+    dev_dependency = True,
+)
+override_repo(rules_android_sdk, "androidsdk")
+
+rules_android_ndk = use_extension(
+    "@rules_android_ndk//:extension.bzl",
+    "android_ndk_repository_extension",
+    dev_dependency = True,
+)
+override_repo(rules_android_ndk, "androidndk")
+
+register_toolchains("@androidndk//:all", "@androidsdk//:all", dev_dependency = True)

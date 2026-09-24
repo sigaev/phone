@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.demo.nativebuttons" android:versionCode="1" android:versionName="1.0">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <application android:label="native_buttons" android:hasCode="false"
+        android:allowBackup="false" android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name="android.app.NativeActivity" android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <!-- android_binary links native deps as lib<target-name>.so. -->
+            <meta-data android:name="android.app.lib_name" android:value="native_buttons" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

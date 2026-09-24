@@ -1,0 +1,3 @@
+/.bazelrc.local
+/MODULE.bazel.lock
+/bazel-*

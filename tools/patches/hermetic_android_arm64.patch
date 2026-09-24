@@ -1,0 +1,175 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 6b9adf2..e1b0d8f 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -10,7 +10,7 @@ config_setting(
+     name = "platform_linux",
+     constraint_values = [
+         "@platforms//os:linux",
+-        "@platforms//cpu:x86_64",
++        "@platforms//cpu:aarch64",
+     ],
+ )
+ 
+@@ -30,10 +30,10 @@ config_setting(
+ )
+ 
+ platform(
+-    name = "linux_x86_64",
++    name = "linux_aarch64",
+     constraint_values = [
+         "@platforms//os:linux",
+-        "@platforms//cpu:x86_64",
++        "@platforms//cpu:aarch64",
+     ],
+     visibility = ["//visibility:private"],
+ )
+@@ -49,7 +49,7 @@ default_java_toolchain(
+     },
+     exec_compatible_with = [
+         "@platforms//os:linux",
+-        "@platforms//cpu:x86_64",
++        "@platforms//cpu:aarch64",
+     ],
+     source_version = "17",
+     target_version = "17",
+diff --git a/extensions.bzl b/extensions.bzl
+index 469a35b..edf7d7a 100644
+--- a/extensions.bzl
++++ b/extensions.bzl
+@@ -50,6 +50,7 @@ def _sdk_kwargs(tag):
+         "build_tools_urls": tag.build_tools_urls,
+         "build_tools_version": tag.build_tools_version,
+         "platform_tools_sha256s": tag.platform_tools_sha256s,
++        "platform_tools_strip_prefixes": tag.platform_tools_strip_prefixes,
+         "platform_tools_urls": tag.platform_tools_urls,
+         "platforms_sha256": tag.platforms_sha256,
+         "platforms_strip_prefix": tag.platforms_strip_prefix,
+diff --git a/ndk/BUILD.ndkredirect.bazel b/ndk/BUILD.ndkredirect.bazel
+index 2b92243..a551562 100644
+--- a/ndk/BUILD.ndkredirect.bazel
++++ b/ndk/BUILD.ndkredirect.bazel
+@@ -14,9 +14,9 @@ package(default_visibility = ["//visibility:public"])
+             "@platforms//os:android",
+             CPU_CONSTRAINT[target_system_name],
+         ],
+-        toolchain = "@androidndk_{}//toolchains/llvm/prebuilt/{}-x86_64:cc_toolchain_{}".format(
+-            platform,
++        toolchain = "@androidndk_{}//toolchains/llvm/prebuilt/{}:cc_toolchain_{}".format(
+             platform,
++            platform + ("-arm64" if platform == "linux" else "-x86_64"),
+             target_system_name,
+         ),
+         toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+diff --git a/ndk/repositories.bzl b/ndk/repositories.bzl
+index c1a575d..42038ae 100644
+--- a/ndk/repositories.bzl
++++ b/ndk/repositories.bzl
+@@ -36,7 +36,7 @@ NDK_TAG = tag_class(attrs = {
+ 
+ _CLANG_DIRECTORIES = {
+     "darwin": "toolchains/llvm/prebuilt/darwin-x86_64",
+-    "linux": "toolchains/llvm/prebuilt/linux-x86_64",
++    "linux": "toolchains/llvm/prebuilt/linux-arm64",
+     "windows": "toolchains/llvm/prebuilt/windows-x86_64",
+ }
+ 
+@@ -120,7 +120,28 @@ def _download_ndk(rctx, ndk):
+             kwargs["sha256"] = ndk["sha256s"][platform]
+         else:
+             fail("Missing NDK archive checksum for resolved platform {}.".format(platform))
+-        rctx.download_and_extract(**kwargs)
++        if platform == "linux":
++            # This ARM64 build only needs the compiler, linker and sysroot.
++            # Avoid unpacking the bundled Python, IDE tools and debuggers on
++            # the phone. The original archive is still checksum-verified.
++            strip_prefix = kwargs.pop("stripPrefix")
++            rctx.download(output = "ndk.tar.xz", **kwargs)
++            excluded = [
++                "*/python3", "*/shader-tools", "*/lldb-server",
++                "*/bin/clangd", "*/bin/clang-check", "*/bin/clang-scan-deps",
++                "*/bin/clang-tidy*", "*/bin/llvm-bolt*", "*/bin/dsymutil",
++                "*/bin/llvm-cfi-verify", "*/bin/llvm-ml", "*/bin/sancov",
++                "*/bin/llvm-dwarfdump",
++            ]
++            result = rctx.execute([
++                "tar", "--extract", "--xz", "--file=ndk.tar.xz",
++                "--strip-components={}".format(len(strip_prefix.split("/"))),
++            ] + ["--exclude=" + pattern for pattern in excluded], timeout = 600)
++            if result.return_code:
++                fail("Could not extract ARM64 NDK: " + result.stderr)
++            rctx.delete("ndk.tar.xz")
++        else:
++            rctx.download_and_extract(**kwargs)
+ 
+ def _clang_resource_dir(rctx, clang_directory):
+     for parent in ["lib/clang", "lib64/clang"]:
+diff --git a/private/utils.bzl b/private/utils.bzl
+index 9486878..35d8b62 100644
+--- a/private/utils.bzl
++++ b/private/utils.bzl
+@@ -9,7 +9,7 @@ ANDROID_PLATFORMS = {
+     },
+     "linux": {
+         "constraints": [
+-            ("linux", ["@platforms//os:linux", "@platforms//cpu:x86_64"]),
++            ("linux", ["@platforms//os:linux", "@platforms//cpu:aarch64"]),
+         ],
+         "executable_extension": "",
+     },
+diff --git a/sdk/repositories.bzl b/sdk/repositories.bzl
+index 382dc68..4db4291 100644
+--- a/sdk/repositories.bzl
++++ b/sdk/repositories.bzl
+@@ -54,6 +54,9 @@ SDK_TAG = tag_class(attrs = {
+     "platform_tools_sha256s": attr.string_dict(
+         doc = "Custom platform-tools archive SHA-256 values keyed by the same platforms as platform_tools_urls.",
+     ),
++    "platform_tools_strip_prefixes": attr.string_dict(
++        doc = "Custom platform-tools strip prefixes, allowing a combined SDK archive.",
++    ),
+     "platforms_url": attr.string(
+         doc = "Custom Android platform archive URL.",
+     ),
+@@ -106,6 +109,7 @@ def _custom_archive_attrs(rctx):
+         rctx.attr.build_tools_strip_prefixes or
+         rctx.attr.platform_tools_urls or
+         rctx.attr.platform_tools_sha256s or
++        rctx.attr.platform_tools_strip_prefixes or
+         rctx.attr.platforms_url or
+         rctx.attr.platforms_sha256 or
+         rctx.attr.platforms_strip_prefix
+@@ -182,7 +186,7 @@ def _resolve_custom_sdk(rctx):
+         rctx,
+         rctx.attr.platform_tools_urls,
+         rctx.attr.platform_tools_sha256s,
+-        {},
++        rctx.attr.platform_tools_strip_prefixes,
+         "platform_tools",
+     )
+ 
+@@ -422,7 +426,7 @@ def _platform_rules_for(platform, sdk):
+     srcs = glob([
+         "build-tools/{platform}/{build_tools_directory}/lib/**",
+         "build-tools/{platform}/{build_tools_directory}/lib64/**",
+-    ]),
++    ], allow_empty = True),
+ )
+ """.format(
+         build_tools_directory = build_tools_directory,
+@@ -858,6 +862,7 @@ hermetic_android_sdk_platform_repository = repository_rule(
+         "build_tools_version": attr.string(mandatory = True),
+         "emulator_version": attr.string(),
+         "platform_tools_sha256s": attr.string_dict(),
++        "platform_tools_strip_prefixes": attr.string_dict(),
+         "platform_tools_urls": attr.string_dict(),
+         "platforms_sha256": attr.string(),
+         "platforms_strip_prefix": attr.string(),
+@@ -925,6 +930,7 @@ hermetic_android_sdk_repository = repository_rule(
+         "emulator_version": attr.string(),
+         "platform_repositories": attr.string_dict(mandatory = True),
+         "platform_tools_sha256s": attr.string_dict(),
++        "platform_tools_strip_prefixes": attr.string_dict(),
+         "platform_tools_urls": attr.string_dict(),
+         "platforms_sha256": attr.string(),
+         "platforms_strip_prefix": attr.string(),

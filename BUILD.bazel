@@ -1,0 +1,10 @@
+package(default_visibility = ["//visibility:public"])
+
+# rules_android uses the platform target's name as the APK's ABI directory.
+platform(
+    name = "arm64-v8a",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:android",
+    ],
+)
