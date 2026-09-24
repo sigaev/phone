@@ -106,20 +106,20 @@ Mat4 perspective(float fov, float aspect, float near, float far) {
         value = 0;
     float f = 1 / std::tan(fov * .5f);
     m.v[0] = f / aspect;
-    m.v[5] = f;
-    m.v[10] = (far + near) / (near - far);
+    m.v[5] = -f;
+    m.v[10] = far / (near - far);
     m.v[11] = -1;
-    m.v[14] = 2 * far * near / (near - far);
+    m.v[14] = far * near / (near - far);
     return m;
 }
 Mat4 ortho(float l, float r, float b, float t, float n, float f) {
     Mat4 m;
     m.v[0] = 2 / (r - l);
-    m.v[5] = 2 / (t - b);
-    m.v[10] = -2 / (f - n);
+    m.v[5] = -2 / (t - b);
+    m.v[10] = -1 / (f - n);
     m.v[12] = -(r + l) / (r - l);
-    m.v[13] = -(t + b) / (t - b);
-    m.v[14] = -(f + n) / (f - n);
+    m.v[13] = (t + b) / (t - b);
+    m.v[14] = -n / (f - n);
     return m;
 }
 Mat4 look_at(Vec3 eye, Vec3 center, Vec3 up) {

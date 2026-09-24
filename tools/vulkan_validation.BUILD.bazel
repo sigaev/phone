@@ -1,0 +1,2 @@
+# Used only by the opt-in on-device validation runner, never by the APK.
+exports_files(["arm64-v8a/libVkLayer_khronos_validation.so"])

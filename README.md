@@ -4,8 +4,10 @@ The [native_buttons app](native_buttons/README.md) lives in `native_buttons/`.
 Shared code and build infrastructure stay outside app directories:
 
 - `common/` provides shared ownership, error handling, and Android runtime support.
-- `common/gpu/` provides the shared EGL/OpenGL ES 3.2 renderer, mesh primitives,
+- `common/gpu/` provides the shared Vulkan 1.1 renderer, mesh primitives,
   shadows, HDR, bloom, compute particles, and GPU text drawing.
+- `tools/spirv.bzl` compiles and validates optimized SPIR-V with the pinned NDK
+  during the Bazel build. No shader compiler is linked into the app.
 - `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform.
 - `MODULE.bazel`, `.bazelrc`, and `tools/` configure the toolchains.
 - `tools/android.bzl` exports `ANDROID_COPTS` and `ANDROID_LINKOPTS`
@@ -70,8 +72,8 @@ The community builds replace Google's x86-64 host binaries. The patch in
 `tools/patches/` adapts the upstream Bazel module's Linux host
 constraints and NDK directory layout, and allows extracting platform-tools
 from the combined SDK archive, whose optional `lib64` directory is absent.
-NDK extraction skips bundled Python, shader tools, IDE utilities, and debugger
-servers to fit the phone's storage. Extraction requires GNU `tar` with xz
+NDK extraction keeps the shader compiler and validator, and skips bundled Python,
+IDE utilities, and debugger servers to fit the phone's storage. Extraction requires GNU `tar` with xz
 support; compiler tools, headers, sysroots, and runtime libraries are retained.
 Downloads remain pinned by SHA-256 and declared as Bazel toolchain inputs.
 Compilation and linking use the downloaded NDK's compiler, headers, and sysroot.

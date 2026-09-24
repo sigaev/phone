@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <span>
 #include <string_view>
 
@@ -12,9 +13,9 @@ struct ANativeWindow;
 namespace gpu {
 struct Renderer;
 struct SceneShaders {
-    const char* vertex;
-    const char* fragment;
-    const char* sky;
+    std::span<const std::uint32_t> vertex;
+    std::span<const std::uint32_t> fragment;
+    std::span<const std::uint32_t> sky;
 };
 enum class Shape { kSphere, kLowSphere, kTorus, kCylinder, kCone, kPlane, kFeather, kCount };
 using MeshId = unsigned;
@@ -46,6 +47,9 @@ void draw_text(Renderer& renderer, const char* value, float x, float baseline, f
                Color color, bool centered = false);
 common::Result<void> present(Renderer& renderer);
 common::Result<void> capture_frame(Renderer& renderer, const char* ppm_path);
+common::Result<void> wait_frame(Renderer& renderer);
+// Capture tightly packed RGBA rows from top to bottom on an offscreen renderer.
+common::Result<void> read_pixels(Renderer& renderer, std::span<unsigned char> rgba);
 RenderStats get_stats(const Renderer& renderer);
 std::string_view get_device(const Renderer& renderer);
 }  // namespace gpu

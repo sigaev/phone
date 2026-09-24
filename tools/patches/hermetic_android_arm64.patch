@@ -49,7 +49,24 @@ diff --git a/ndk/BUILD.ndkredirect.bazel b/ndk/BUILD.ndkredirect.bazel
 index 2b92243..a551562 100644
 --- a/ndk/BUILD.ndkredirect.bazel
 +++ b/ndk/BUILD.ndkredirect.bazel
-@@ -14,9 +14,9 @@ package(default_visibility = ["//visibility:public"])
+@@ -6,6 +6,16 @@
+ 
+ package(default_visibility = ["//visibility:public"])
+ 
++alias(
++    name = "glslc",
++    actual = "@androidndk_linux//:shader-tools/linux-arm64/glslc",
++)
++
++alias(
++    name = "spirv_val",
++    actual = "@androidndk_linux//:shader-tools/linux-arm64/spirv-val",
++)
++
+ [
+     toolchain(
+         name = "toolchain_{}_{}".format(platform_name, target_system_name),
+@@ -14,9 +24,9 @@ package(default_visibility = ["//visibility:public"])
              "@platforms//os:android",
              CPU_CONSTRAINT[target_system_name],
          ],
@@ -80,13 +97,13 @@ index c1a575d..42038ae 100644
              fail("Missing NDK archive checksum for resolved platform {}.".format(platform))
 -        rctx.download_and_extract(**kwargs)
 +        if platform == "linux":
-+            # This ARM64 build only needs the compiler, linker and sysroot.
++            # This ARM64 build needs the compiler, linker, sysroot and shader tools.
 +            # Avoid unpacking the bundled Python, IDE tools and debuggers on
 +            # the phone. The original archive is still checksum-verified.
 +            strip_prefix = kwargs.pop("stripPrefix")
 +            rctx.download(output = "ndk.tar.xz", **kwargs)
 +            excluded = [
-+                "*/python3", "*/shader-tools", "*/lldb-server",
++                "*/python3", "*/lldb-server",
 +                "*/bin/clangd", "*/bin/clang-check", "*/bin/clang-scan-deps",
 +                "*/bin/clang-tidy*", "*/bin/llvm-bolt*", "*/bin/dsymutil",
 +                "*/bin/llvm-cfi-verify", "*/bin/llvm-ml", "*/bin/sancov",
@@ -173,3 +190,15 @@ index 382dc68..4db4291 100644
          "platform_tools_urls": attr.string_dict(),
          "platforms_sha256": attr.string(),
          "platforms_strip_prefix": attr.string(),
+diff --git a/ndk/BUILD.androidndk.bazel b/ndk/BUILD.androidndk.bazel
+--- a/ndk/BUILD.androidndk.bazel
++++ b/ndk/BUILD.androidndk.bazel
+@@ -9,6 +9,8 @@
+ exports_files([
+     "target_systems.bzl",
+     "sources/android/native_app_glue/android_native_app_glue.h",
++    "shader-tools/linux-arm64/glslc",
++    "shader-tools/linux-arm64/spirv-val",
+ ])
+ 
+ cc_library(

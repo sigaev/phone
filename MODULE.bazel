@@ -12,6 +12,14 @@ libcxx_runtime(
 )
 
 http_archive(
+    name = "vulkan_validation",
+    build_file = "//tools:vulkan_validation.BUILD.bazel",
+    sha256 = "9c0615f25e13576f86ea68b5799578b849a858fda1ba242ef892bc9455b0a473",
+    strip_prefix = "android-binaries-1.4.321.0",
+    urls = ["https://github.com/KhronosGroup/Vulkan-ValidationLayers/releases/download/vulkan-sdk-1.4.321.0/android-binaries-1.4.321.0.tar.gz"],
+)
+
+http_archive(
     name = "stb",
     build_file = "//tools:stb.BUILD.bazel",
     sha256 = "50417aaef6436990c7931860b858f03427cc3d62279425dd13b3cfef091ea15f",

@@ -1,0 +1,36 @@
+#version 450
+layout(set = 0, binding = 0, std140) uniform Globals {
+    mat4 u_view;
+    mat4 u_light;
+    vec4 u_eye_time;
+    vec4 u_size;
+};
+#define u_time u_eye_time.w
+#define u_eye u_eye_time.xyz
+#define u_shadow_texel u_size.y
+#define u_scale u_size.x
+
+layout(local_size_x = 128) in;
+layout(std430, set = 0, binding = 3) buffer Particles {
+    vec4 points[];
+};
+
+uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+float rnd(uint x) {
+    return float(hash(x) & 0x00ffffffu) / 16777215.;
+}
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec3 seed = vec3(rnd(i * 3u + 1u), rnd(i * 3u + 2u), rnd(i * 3u + 3u));
+    vec3 p = vec3(mod(seed.x * 38. - u_time * (.12 + seed.z * .24), 38.) - 19., seed.y * 5.8 + .25,
+                  -3. - seed.z * 17.);
+    p.y += sin(u_time * .65 + seed.x * 40.) * .18;
+    p.z += sin(u_time * .35 + seed.y * 20.) * .20;
+    points[i] = vec4(p, seed.x);
+}

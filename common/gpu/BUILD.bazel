@@ -1,20 +1,45 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tools:android.bzl", "ANDROID_COPTS", "ANDROID_LINKOPTS")
+load("//tools:spirv.bzl", "spirv_shader")
+
+[spirv_shader(
+    name = name.replace(".", "_"),
+    src = "shaders/" + name,
+) for name in [
+    "full.vert",
+    "blur.frag",
+    "post.frag",
+    "particles.comp",
+    "particle.vert",
+    "particle.frag",
+    "ui.vert",
+    "ui.frag",
+]]
 
 cc_library(
     name = "gpu",
     srcs = [
         "math.cc",
         "renderer.cc",
+        ":blur_frag",
+        ":full_vert",
+        ":particle_frag",
+        ":particle_vert",
+        ":particles_comp",
+        ":post_frag",
+        ":ui_frag",
+        ":ui_vert",
     ],
     hdrs = [
         "math.h",
         "renderer.h",
     ],
-    copts = ANDROID_COPTS,
+    copts = ANDROID_COPTS + select({
+        "//tools:vulkan_validation": ["-DNATIVE_BUTTONS_VULKAN_VALIDATION"],
+        "//conditions:default": [],
+    }),
     linkopts = ANDROID_LINKOPTS + [
-        "-lEGL",
-        "-lGLESv3",
+        "-lvulkan",
     ],
     target_compatible_with = ["@platforms//os:android"],
     visibility = ["//visibility:public"],

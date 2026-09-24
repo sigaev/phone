@@ -1,7 +1,18 @@
 load("@rules_android//rules:rules.bzl", "android_binary")
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tools:android.bzl", "ANDROID_COPTS", "ANDROID_LINKOPTS")
+load("//tools:spirv.bzl", "spirv_shader")
+
+[spirv_shader(
+    name = name.replace(".", "_"),
+    src = "shaders/" + name,
+) for name in [
+    "mesh.vert",
+    "scene.frag",
+    "sky.frag",
+]]
 
 package(default_visibility = ["//visibility:private"])
 
@@ -10,8 +21,13 @@ cc_library(
     srcs = [
         "scene.cc",
         "shaders.cc",
+        ":mesh_vert",
+        ":scene_frag",
+        ":sky_frag",
     ],
-    hdrs = ["scene.h"],
+    hdrs = [
+        "scene.h",
+    ],
     copts = ANDROID_COPTS,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
@@ -48,7 +64,28 @@ android_binary(
 cc_binary(
     name = "gpu_probe",
     srcs = ["gpu_probe.cc"],
-    copts = ANDROID_COPTS,
+    copts = ANDROID_COPTS + select({
+        "//tools:vulkan_validation": ["-DNATIVE_BUTTONS_VULKAN_VALIDATION"],
+        "//conditions:default": [],
+    }),
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [
+        ":scene",
+        "//common:support",
+        "//common/gpu",
+    ],
+)
+
+cc_test(
+    name = "renderer_test",
+    size = "medium",
+    srcs = ["gpu_probe.cc"],
+    args = ["--exercise"],
+    copts = ANDROID_COPTS + select({
+        "//tools:vulkan_validation": ["-DNATIVE_BUTTONS_VULKAN_VALIDATION"],
+        "//conditions:default": [],
+    }),
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [

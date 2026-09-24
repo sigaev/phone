@@ -11,4 +11,18 @@ exports_files([
     "libcxx.bzl",
     "no_unwind.ld",
     "stb.BUILD.bazel",
+    "spirv.bzl",
+    "vulkan_validation.BUILD.bazel",
 ])
+
+config_setting(
+    name = "vulkan_validation",
+    define_values = {"vulkan_validation": "true"},
+    visibility = ["//visibility:public"],
+)
+
+android_test_runner(
+    name = "vulkan_validation_runner",
+    validation_layer = "@vulkan_validation//:arm64-v8a/libVkLayer_khronos_validation.so",
+    visibility = ["//visibility:public"],
+)
