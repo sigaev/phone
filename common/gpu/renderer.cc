@@ -179,6 +179,7 @@ struct Renderer {
     unsigned frame_index = 0, image_index = 0, last_frame = 0, triangle_count = 0;
     int width = 0, height = 0, window_width = 0, window_height = 0, render_width = 0,
         render_height = 0, shadow_size = 0, particle_count = 0;
+    int observed_window_width = 0, observed_window_height = 0;
     bool maximum = false, recreate_surface = false, targets_ready = false, has_frame = false;
     float gpu_millis = 0;
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_4_BIT;
@@ -1047,9 +1048,9 @@ Result<bool> ensure_targets(Renderer& r, bool maximum) {
     int width = r.width, height = r.height;
     VkSurfaceCapabilitiesKHR capabilities{};
     if (r.window) {
-        // Android's ordinary window dimensions can report the buffer size set
-        // by our old swapchain. Surface capabilities query the consumer's current
-        // window extent instead, including rotation and multi-window resizing.
+        // Allocate to the extent advertised by Vulkan. Android can cache this
+        // until presentation; prepare_frame also observes the independent native
+        // window size so an idle resize can trigger the frame that refreshes it.
         VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r.physical, r.surface, &capabilities));
         auto extent = surface_extent(r, capabilities);
         width = extent.width;
@@ -1442,22 +1443,40 @@ Result<MeshId> create_mesh(Renderer& r, std::span<const Vertex> vertices,
     return static_cast<MeshId>(r.meshes.size() - 1);
 }
 Result<bool> prepare_frame(Renderer& r, bool maximum) {
-    return ensure_targets(r, maximum);
+    auto result = ensure_targets(r, maximum);
+    if (result && *result && r.window) {
+        // Compare each size source against its own last observation. They can
+        // disagree until queueBuffer refreshes Android's capability cache. Do
+        // not wait for agreement before submitting that cache-refresh frame.
+        r.observed_window_width = ANativeWindow_getWidth(r.window);
+        r.observed_window_height = ANativeWindow_getHeight(r.window);
+    }
+    return result;
+}
+Result<bool> surface_changed(const Renderer& r) {
+    if (!r.targets_ready || r.recreate_surface)
+        return true;
+    if (!r.window)
+        return false;
+    VkSurfaceCapabilitiesKHR capabilities;
+    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r.physical, r.surface, &capabilities));
+    auto extent = surface_extent(r, capabilities);
+    return int(extent.width) != r.window_width || int(extent.height) != r.window_height ||
+           capabilities.currentTransform != r.surface_transform ||
+           ANativeWindow_getWidth(r.window) != r.observed_window_width ||
+           ANativeWindow_getHeight(r.window) != r.observed_window_height;
 }
 Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximum) {
     // Camera and UI coordinates refer to the targets prepared by the caller.
     // Never rebuild them here after that layout has been computed.
     if (!r.targets_ready || r.maximum != maximum || r.recreate_surface)
         return false;
-    if (r.window) {
-        VkSurfaceCapabilitiesKHR capabilities;
-        VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r.physical, r.surface, &capabilities));
-        auto extent = surface_extent(r, capabilities);
-        if (int(extent.width) != r.window_width || int(extent.height) != r.window_height ||
-            capabilities.currentTransform != r.surface_transform) {
-            r.recreate_surface = true;
-            return false;
-        }
+    auto changed = surface_changed(r);
+    if (!changed)
+        return std::unexpected(changed.error());
+    if (*changed) {
+        r.recreate_surface = true;
+        return false;
     }
     auto& frame = r.frames[r.frame_index];
     VK_CHECK(vkWaitForFences(r.device, 1, &frame.fence, VK_TRUE, kFrameTimeout));
@@ -1621,6 +1640,16 @@ Result<bool> present(Renderer& r) {
             return false;
         } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
             return fail("Cannot present the Vulkan frame", result);
+        // Acquisition/presentation can block across a resize without reporting
+        // OUT_OF_DATE. Consume the acquired image and its semaphores first, then
+        // request another frame if its geometry has already become stale.
+        auto changed = surface_changed(r);
+        if (!changed)
+            return std::unexpected(changed.error());
+        if (*changed) {
+            r.recreate_surface = true;
+            return false;
+        }
     }
     return true;
 }

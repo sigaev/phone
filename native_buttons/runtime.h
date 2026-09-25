@@ -34,6 +34,9 @@ common::Result<void> set_surface(Runtime& runtime, ANativeWindow* window, int wi
 common::Result<void> detach_surface(Runtime& runtime);
 // Fail after three seconds if a required redraw cannot complete.
 common::Result<void> redraw(Runtime& runtime);
+// A paused Activity can remain visible in split screen. Stop monitoring only
+// when it is hidden (onStop), not when it loses foreground interaction (onPause).
+void set_visible(Runtime& runtime, bool visible);
 void set_resumed(Runtime& runtime, bool resumed);
 void set_content(Runtime& runtime, gpu::Rect content);
 void activate(Runtime& runtime, Control control);

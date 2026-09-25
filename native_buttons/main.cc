@@ -198,6 +198,12 @@ void on_pause(ANativeActivity* activity) {
 void on_resume(ANativeActivity* activity) {
     set_resumed(*state(activity)->runtime, true);
 }
+void on_start(ANativeActivity* activity) {
+    set_visible(*state(activity)->runtime, true);
+}
+void on_stop(ANativeActivity* activity) {
+    set_visible(*state(activity)->runtime, false);
+}
 void on_configuration_changed(ANativeActivity* activity) {
     auto& app = *state(activity);
     if (auto result = configure_input(app); !result)
@@ -275,6 +281,8 @@ extern "C" __attribute__((visibility("default"))) void ANativeActivity_onCreate(
     callbacks->onInputQueueCreated = on_input_created;
     callbacks->onInputQueueDestroyed = on_input_destroyed;
     callbacks->onContentRectChanged = on_content_changed;
+    callbacks->onStart = on_start;
+    callbacks->onStop = on_stop;
     callbacks->onPause = on_pause;
     callbacks->onResume = on_resume;
     callbacks->onConfigurationChanged = on_configuration_changed;

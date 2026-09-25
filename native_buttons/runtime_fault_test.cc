@@ -56,6 +56,13 @@ std::atomic<bool> unavailable{false}, resize_during_render{false}, renderer_aliv
 std::atomic<unsigned> waits{0}, callbacks{0};
 std::atomic<float> visible_add_x{0}, visible_add_y{0};
 std::atomic<bool> stall_render{false}, stall_destroy{false}, worker_stalled{false};
+// A consumer resize arrives independently of Activity callbacks and vsync.
+std::atomic<std::uint64_t> surface_geometry{0};
+std::atomic<unsigned> surface_checks{0};
+std::atomic<bool> surface_query_failure{false};
+std::uint64_t geometry(int width, int height) {
+    return (std::uint64_t(width) << 32) | unsigned(height);
+}
 // Deliver deterministic 60 Hz timestamps on the real worker's looper, without
 // sleeping for animation time or calling the worker recursively.
 struct FrameClock {
@@ -123,6 +130,13 @@ void add(Renderer&, Shape, Mat4, Color, float, float, float, float) {
 }
 void add(Renderer&, MeshId, Mat4, Color, float, float, float, float) {
 }
+common::Result<bool> surface_changed(const Renderer& r) {
+    ++surface_checks;
+    if (surface_query_failure)
+        return std::unexpected(common::Error{"Surface query failed"});
+    auto extent = surface_geometry.load();
+    return extent && extent != geometry(r.width, r.height);
+}
 common::Result<bool> prepare_frame(Renderer& r, bool) {
     if (r.prepared)
         return std::unexpected(common::Error{"Frame targets were prepared twice"});
@@ -136,6 +150,13 @@ common::Result<bool> prepare_frame(Renderer& r, bool) {
         r.width = 720;
         r.height = 320;
         r.resize_pending = false;
+    }
+    if (auto extent = surface_geometry.load()) {
+        int width = extent >> 32, height = unsigned(extent);
+        if (!width || !height)
+            return false;
+        r.width = width;
+        r.height = height;
     }
     r.prepared = true;
     return true;
@@ -209,6 +230,101 @@ using namespace native_buttons;
     } while (false)
 
 enum class Stall { kSnapshot, kDetach, kDestroy, kRedrawThenDestroy };
+Result<void> check_idle_resize(const char* directory) {
+    auto runtime = create_runtime(
+        directory,
+        SessionState{.count = 41, .paused = true, .yaw = .7f, .time = 123., .zoom = 1.2f});
+    CHECK(runtime, "Cannot create paused resize runtime");
+    auto& r = **runtime;
+    CHECK(set_surface(r, nullptr, 400, 720), "Cannot attach paused resize scene");
+    set_visible(r, true);
+    set_resumed(r, true);
+    set_content(r, {});
+    CHECK(redraw(r), "Cannot complete the early rotation callback");
+    // Android's new consumer extent arrives after the last Activity callback.
+    // No input, redraw request or Choreographer callback follows this change.
+    auto wait_for_extent = [&](std::uint64_t extent) {
+        surface_geometry = extent;
+        int width = extent >> 32, height = unsigned(extent);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        auto state = get_state(r);
+        while ((state.safe.w != width || state.safe.h != height) &&
+               std::chrono::steady_clock::now() < deadline) {
+            usleep(10000);
+            state = get_state(r);
+        }
+        return state;
+    };
+    for (auto extent : {geometry(720, 400), geometry(400, 720), geometry(500, 500),
+                        geometry(360, 500), geometry(800, 360)}) {
+        auto state = wait_for_extent(extent);
+        CHECK(state.error.empty() && state.safe.w == int(extent >> 32) &&
+                  state.safe.h == unsigned(extent),
+              "Paused picture stayed stretched after a delayed window resize");
+        CHECK(state.paused && state.time == 123. && state.yaw == .7f && state.zoom == 1.2f,
+              "Window repair changed the paused scene");
+        auto add = layout_controls(state.safe).add;
+        CHECK(gpu::contains(add, visible_add_x, visible_add_y),
+              "Delayed resize left the controls at the previous geometry");
+        usleep(250000);
+        CHECK(get_state(r).frames == state.frames,
+              "Paused scene rendered continuously after repair");
+    }
+    float x = visible_add_x, y = visible_add_y;
+    touch(r, Touch::kDown, x, y);
+    touch(r, Touch::kUp, x, y);
+    auto snapshot = capture_state(r);
+    CHECK(snapshot && snapshot->count == 42, "Repaired control missed its touch target");
+
+    // Temporarily zero-sized surfaces must recover without a fresh callback.
+    CHECK(redraw(r), "Cannot settle input before surface loss");
+    auto frames = get_state(r).frames;
+    surface_geometry = geometry(1, 0);
+    usleep(250000);
+    CHECK(get_state(r).frames == frames && get_state(r).error.empty(),
+          "Temporary zero extent was rendered or treated as fatal");
+    auto recovered = wait_for_extent(geometry(400, 720));
+    CHECK(recovered.safe.w == 400 && recovered.safe.h == 720 && recovered.time == 123.,
+          "Zero-sized paused surface did not recover");
+
+    // Activity pause does not hide a split-screen window. Geometry monitoring
+    // continues there; onStop disables it, and onStart repairs the saved view.
+    set_resumed(r, false);
+    CHECK(redraw(r), "Cannot pause the visible Activity");
+    auto visible = wait_for_extent(geometry(720, 400));
+    CHECK(visible.safe.w == 720 && visible.safe.h == 400,
+          "Visible paused Activity ignored a delayed resize");
+    set_visible(r, false);
+    CHECK(capture_state(r), "Cannot hide the Activity");
+    frames = get_state(r).frames;
+    unsigned checks = surface_checks;
+    surface_geometry = geometry(500, 500);
+    usleep(250000);
+    CHECK(surface_checks == checks && get_state(r).frames == frames,
+          "Hidden Activity kept monitoring or drawing its window");
+    set_visible(r, true);
+    auto shown = wait_for_extent(geometry(500, 500));
+    CHECK(shown.safe.w == 500 && shown.safe.h == 500 && shown.time == 123.,
+          "Showing the Activity kept hidden-window geometry");
+    CHECK(detach_surface(r) && !renderer_alive, "Cannot detach repaired surface");
+    checks = surface_checks;
+    usleep(250000);
+    CHECK(surface_checks == checks, "Geometry check touched a detached surface");
+    CHECK(set_surface(r, nullptr, 400, 720) && redraw(r), "Cannot recreate paused surface");
+    auto recreated = wait_for_extent(geometry(720, 400));
+    CHECK(recreated.safe.w == 720 && recreated.safe.h == 400,
+          "Recreated surface lost idle resize monitoring");
+
+    surface_query_failure = true;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (get_state(r).error.empty() && std::chrono::steady_clock::now() < deadline)
+        usleep(10000);
+    CHECK(get_state(r).error == "Surface query failed", "Idle surface query failure was hidden");
+    CHECK(!detach_surface(r) && !renderer_alive, "Query failure prevented surface release");
+    surface_query_failure = false;
+    surface_geometry = 0;
+    return {};
+}
 Result<void> check_animation_clock(const char* directory) {
     for (double start : {65536., 262144., 524288.}) {
         common::Owner<FrameClock> clock(new FrameClock{eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)});
@@ -343,7 +459,7 @@ Result<void> check_faults(const char* directory) {
 
     for (auto* deferrals : {&prepare_deferrals, &present_deferrals}) {
         unsigned previous_waits = waits, previous_frames = get_state(r).frames;
-        *deferrals = 1;
+        *deferrals = 4;
         CHECK(redraw(r), "Transient deferral did not recover");
         CHECK(*deferrals == 0 && waits == previous_waits + 1 &&
                   get_state(r).frames == previous_frames + 1,
@@ -392,10 +508,14 @@ int main() {
     Result<void> result;
     for (auto stall :
          {Stall::kSnapshot, Stall::kDetach, Stall::kDestroy, Stall::kRedrawThenDestroy}) {
+        if (!result)
+            break;
         result = check_stalled_worker(directory.c_str(), stall);
         if (!result)
             break;
     }
+    if (result)
+        result = check_idle_resize(directory.c_str());
     if (result)
         result = check_animation_clock(directory.c_str());
     if (result)
@@ -408,6 +528,8 @@ int main() {
         std::fprintf(stderr, "%s\n", result.error().message.c_str());
         return 1;
     }
-    std::puts("Deferred redraw recovery/deadline, missing vsync, resize and hit targets passed");
+    std::puts(
+        "Idle/hidden window resizing, deferred redraw recovery/deadline, missing vsync, resize "
+        "and hit targets passed");
     return 0;
 }

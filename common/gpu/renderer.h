@@ -41,6 +41,10 @@ void add(Renderer& renderer, Shape shape, Mat4 model, Color color, float roughne
          float metal = 0, float emission = 0, float kind = 0);
 void add(Renderer& renderer, MeshId mesh, Mat4 model, Color color, float roughness = .45f,
          float metal = 0, float emission = 0, float kind = 0);
+// Inspect the Vulkan extent/transform and independent native-window dimensions
+// without allocating targets or rendering.
+// Idle windows must keep checking: Android can resize after its last callback.
+common::Result<bool> surface_changed(const Renderer& renderer);
 // Frame operations return false when the surface is temporarily unavailable.
 // Retry from prepare_frame on a later frame; do not continue to render/present.
 // Prepare once before constructing the camera and UI layout. render() preserves

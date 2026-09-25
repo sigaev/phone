@@ -32,6 +32,10 @@ Pinching cancels pending button taps and keeps the controls at their normal size
 After a pinch, lift both fingers before starting another one-finger drag or tap. Pause
 freezes both the animation and the automatic camera motion and stops continuous
 rendering. Controls, dragging, and window redraws still update the paused scene.
+While the Activity remains visible, lightweight geometry checks run every 100 ms.
+A paused scene needs GPU work only for a changed surface or pending redraw. This
+also covers visible but inactive split-screen windows. Monitoring stops when the Activity
+is hidden or the surface is detached, and resumes when it becomes visible.
 The feet and crank arms share the same forward-pedaling motion.
 **High detail** uses native resolution,
 4x MSAA, 2048-pixel shadows, and 16,384 particles. **Ultra detail** uses
@@ -43,7 +47,8 @@ Rendering and counter persistence run on a dedicated native thread. Required
 window-redraw callbacks wait for a completed frame, including while paused;
 window-destruction callbacks wait until the worker releases the surface.
 Temporary surface unavailability and out-of-date swapchains defer frames for a
-later retry. Redraws, state snapshots, surface detachment, and shutdown have
+later retry, with a timed fallback when vsync callbacks are unavailable.
+Redraws, state snapshots, surface detachment, and shutdown have
 three-second monotonic deadlines, including when Choreographer stops delivering
 callbacks. A redraw or snapshot timeout reports an error and allows one further
 second for cleanup. If the worker cannot release its window or stop by the
@@ -56,8 +61,13 @@ become ready only after all resources are created; offscreen capture requires a
 new frame after target replacement. Tap cancellation measures displacement from
 the initial touch using Android's density-aware `ViewConfiguration` tolerance,
 refreshed when the device configuration changes.
-Rotation reads the current extent and transform from Vulkan surface capabilities;
-Android's buffer dimensions can still describe the old swapchain. The camera
+Rotation uses Vulkan's advertised extent and transform for render targets and
+independently monitors native-window dimensions. Android can cache the Vulkan
+extent until presentation, and either report can change after the last Activity
+callback. Each size source is compared with its own previous observation, so a
+cached extent still triggers the frame needed to refresh it. Checks after
+presentation then rebuild stale targets. Idle checks catch later changes without
+advancing paused animation, yaw, or zoom. The camera
 and scene use the full window; only the overlays respect content insets.
 Controls retain at least 48 dp touch targets. Short windows use a compact
 translucent toolbar instead of shrinking the buttons.
@@ -142,9 +152,11 @@ actual scenery positions through a year of animation, phase-wrap continuity, and
 control hit testing, including retaining the previous layout when presentation is
 deferred. The
 runtime fault test runs the real worker and scene with a simulated GPU boundary:
-it checks transient retries, resizing during a frame, visible button hit targets,
-and redraw timeout/cleanup when no vsync callbacks arrive. Subprocess checks
-verify bounded snapshots, detachment and shutdown with a stalled worker or GPU
+it checks delayed rotation and resizing with no subsequent callback or input,
+zero-sized surface recovery, visible/hidden Activity transitions, surface
+recreation, idle query errors, and visible button hit targets. It also checks
+transient retries and redraw timeout/cleanup when no vsync callbacks arrive.
+Subprocess checks verify bounded snapshots, detachment and shutdown with a stalled worker or GPU
 destructor. State tests cover round trips, legacy data, and malformed records.
 Gesture tests exercise real motion-event handling with synthetic Android pointers,
 including reordered indices, extra fingers, near-zero spans, cancellation,
@@ -159,8 +171,10 @@ the changing UI excluded. Fixed-camera captures also check shader-driven motion
 at large timestamps and across phase wraps. The depth-fallback test simulates
 unsupported D24S8 and renders with another format on the real GPU.
 The presentation test uses real GPU commands with a simulated display boundary
-to exercise stale buffer dimensions, all four rotations, resize races, transient
-swapchain failures, and presentation-fence retirement.
+to exercise delayed window-size reports, capabilities cached until presentation,
+all four rotations, transform-only changes,
+resizes during acquisition/presentation, zero extents, idle geometry queries,
+transient swapchain failures, and presentation-fence retirement.
 
 Enable Khronos API and synchronization validation for the GPU tests:
 

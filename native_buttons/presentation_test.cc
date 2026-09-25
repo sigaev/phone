@@ -1,6 +1,6 @@
-// Real Vulkan rendering with a deterministic display boundary. The mock keeps
-// ANativeWindow buffer dimensions stale after rotation, as Android can do, and
-// tracks presentation completion independently of the rendering fences.
+// Real Vulkan rendering with a deterministic display boundary. The mock delays
+// window-size reports and Vulkan capabilities independently, and tracks
+// presentation completion independently of the rendering fences.
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <android/native_window.h>
 #include <vulkan/vulkan.h>
@@ -25,6 +25,16 @@ VkSurfaceTransformFlagBitsKHR transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 VkResult acquire_result = VK_SUCCESS, present_result = VK_SUCCESS, creation_result = VK_SUCCESS;
 unsigned creations = 0, presentation_waits = 0;
 bool hide_maintenance = false;
+bool resize_on_acquire = false, resize_on_present = false;
+bool cache_capabilities = false;
+int cached_width = 0, cached_height = 0;
+VkSurfaceTransformFlagBitsKHR cached_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+VkResult capabilities_result = VK_SUCCESS;
+void resize_window() {
+    std::swap(window_width, window_height);
+    transform = window_width > window_height ? VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR
+                                             : VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+}
 struct Image {
     VkImage handle = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -75,10 +85,10 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkEnumerateInstanceExtensionProperties(
     return result;
 }
 int32_t __wrap_ANativeWindow_getWidth(ANativeWindow*) {
-    return buffer_width;
+    return cache_capabilities ? window_width : buffer_width;
 }
 int32_t __wrap_ANativeWindow_getHeight(ANativeWindow*) {
-    return buffer_height;
+    return cache_capabilities ? window_height : buffer_height;
 }
 VKAPI_ATTR VkResult VKAPI_CALL
 __wrap_vkCreateAndroidSurfaceKHR(VkInstance, const VkAndroidSurfaceCreateInfoKHR*,
@@ -106,10 +116,13 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPhysicalDeviceSurfaceFormatsKHR(
 }
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     VkPhysicalDevice, VkSurfaceKHR, VkSurfaceCapabilitiesKHR* capabilities) {
+    if (capabilities_result != VK_SUCCESS)
+        return capabilities_result;
     *capabilities = {};
     capabilities->minImageCount = 2;
     capabilities->maxImageCount = 3;
-    capabilities->currentExtent = {unsigned(window_width), unsigned(window_height)};
+    capabilities->currentExtent = {unsigned(cache_capabilities ? cached_width : window_width),
+                                   unsigned(cache_capabilities ? cached_height : window_height)};
     capabilities->minImageExtent = {1, 1};
     capabilities->maxImageExtent = {4096, 4096};
     capabilities->maxImageArrayLayers = 1;
@@ -117,7 +130,7 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     capabilities->supportedTransforms =
         VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR |
         VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
-    capabilities->currentTransform = transform;
+    capabilities->currentTransform = cache_capabilities ? cached_transform : transform;
     capabilities->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     return VK_SUCCESS;
 }
@@ -131,9 +144,10 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateSwapchainKHR(VkDevice device,
     creation_result = VK_SUCCESS;
     if (result != VK_SUCCESS)
         return result;
-    require(info->imageExtent.width == unsigned(window_width) &&
-                info->imageExtent.height == unsigned(window_height),
-            "Swapchain used stale window dimensions");
+    require(info->imageExtent.width == unsigned(cache_capabilities ? cached_width : window_width) &&
+                info->imageExtent.height ==
+                    unsigned(cache_capabilities ? cached_height : window_height),
+            "Swapchain ignored the advertised surface extent");
     require(info->preTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
             "Window-coordinate rendering declared an unimplemented pre-rotation");
     common::Owner<Swapchain> swapchain(new Swapchain{device, {}});
@@ -199,6 +213,10 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkAcquireNextImageKHR(VkDevice, VkSwapchai
     acquire_result = VK_SUCCESS;
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
         return result;
+    if (resize_on_acquire) {
+        resize_on_acquire = false;
+        resize_window();
+    }
     *index = swapchain.next_image++ % swapchain.images.size();
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.signalSemaphoreCount = 1;
@@ -207,6 +225,10 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkAcquireNextImageKHR(VkDevice, VkSwapchai
     return submitted == VK_SUCCESS ? result : submitted;
 }
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR* info) {
+    if (resize_on_present) {
+        resize_on_present = false;
+        resize_window();
+    }
     const auto* completion = static_cast<const VkSwapchainPresentFenceInfoEXT*>(info->pNext);
     require(completion && completion->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT &&
                 completion->swapchainCount == 1,
@@ -230,6 +252,11 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkQueuePresentKHR(VkQueue q, const VkPrese
     submit.pWaitSemaphores = info->pWaitSemaphores;
     submit.pWaitDstStageMask = &stage;
     auto submitted = vkQueueSubmit(q, 1, &submit, fence);
+    if (cache_capabilities) {
+        cached_width = window_width;
+        cached_height = window_height;
+        cached_transform = transform;
+    }
     return submitted == VK_SUCCESS ? result : submitted;
 }
 VKAPI_ATTR VkResult VKAPI_CALL __real_vkWaitForFences(VkDevice, unsigned, const VkFence*, VkBool32,
@@ -339,6 +366,9 @@ int main() {
             window_width = sideways ? 720 : 320;
             window_height = sideways ? 320 : 720;
             unsigned before = creations;
+            auto changed = gpu::surface_changed(**renderer);
+            require(changed && *changed && creations == before,
+                    "Idle surface check missed changed extent/transform or allocated targets");
             acquire_result = VK_SUBOPTIMAL_KHR;
             auto result = draw();
             require(result && *result && creations == before + 1,
@@ -350,16 +380,66 @@ int main() {
             require(hit_test(**scene, controls.add.x + controls.add.w * .5f,
                              controls.add.y + controls.add.h * .5f) == int(Control::kAdd),
                     "Rotated control does not match its visible location");
+            changed = gpu::surface_changed(**renderer);
+            require(changed && !*changed, "Repaired surface still reports a geometry change");
+            acquire_result = present_result = VK_SUBOPTIMAL_KHR;
+            auto stable = draw();
+            require(stable && *stable && creations == before + 1,
+                    "Stable compositor rotation caused continuous swapchain replacement");
         }
+        // Android's Surface caches the DEFAULT_WIDTH/HEIGHT used by Vulkan until
+        // queueBuffer. The independent native-window query changes immediately.
+        // Repeated capabilities queries alone must not leave a paused view stale.
+        cache_capabilities = true;
+        cached_width = window_width;
+        cached_height = window_height;
+        cached_transform = transform;
+        resize_window();
+        auto pending = gpu::surface_changed(**renderer);
+        require(pending && *pending, "Cached capabilities hid a late idle resize");
+        auto refresh = draw();
+        require(refresh && !*refresh, "The cache-refresh presentation acknowledged stale geometry");
+        refresh = draw();
+        require(refresh && *refresh, "Cached surface extent did not converge after presentation");
+        pending = gpu::surface_changed(**renderer);
+        require(pending && !*pending, "Refreshed geometry kept requesting frames");
+        cache_capabilities = false;
+
         auto prepared = gpu::prepare_frame(**renderer, false);
         require(prepared && *prepared, "Cannot prepare the resize race");
-        window_width = 720;
-        window_height = 320;
-        transform = VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR;
+        resize_window();
         auto raced = gpu::render(**renderer, {0, 3, 8}, {0, 1, 0}, 0, false);
         require(raced && !*raced, "A resize changed dimensions after layout");
         auto recovered = draw();
         require(recovered && *recovered, "Resize race did not recover");
+        for (auto* resize : {&resize_on_acquire, &resize_on_present}) {
+            auto old_controls = layout_controls({0, 0, float(window_width), float(window_height)});
+            unsigned before = creations;
+            *resize = true;
+            auto deferred = draw();
+            require(deferred && !*deferred && creations == before,
+                    "Resize during acquisition/presentation acknowledged a stale frame");
+            require(hit_test(**scene, old_controls.add.x + old_controls.add.w * .5f,
+                             old_controls.add.y + old_controls.add.h * .5f) == int(Control::kAdd),
+                    "Deferred presentation replaced the last completed touch layout");
+            recovered = draw();
+            auto stats = gpu::get_stats(**renderer);
+            require(recovered && *recovered && creations == before + 1 &&
+                        stats.width == window_width && stats.height == window_height,
+                    "Late presentation resize did not rebuild camera and render targets");
+        }
+        int previous_width = window_width;
+        window_width = 0;
+        auto changed = gpu::surface_changed(**renderer);
+        auto unavailable = draw();
+        require(changed && *changed && unavailable && !*unavailable,
+                "Zero extent was not reported as a deferred surface change");
+        window_width = previous_width;
+        recovered = draw();
+        require(recovered && *recovered, "Temporarily zero-sized surface did not recover");
+        capabilities_result = VK_ERROR_SURFACE_LOST_KHR;
+        require(!gpu::surface_changed(**renderer), "Idle surface query error was ignored");
+        capabilities_result = VK_SUCCESS;
         for (auto* fault : {&acquire_result, &present_result, &creation_result}) {
             *fault = VK_ERROR_OUT_OF_DATE_KHR;
             bool maximum = fault == &creation_result;
@@ -378,5 +458,7 @@ int main() {
     require(gpu::validation_error_count() == 0, "Vulkan validation failed");
 #endif
     std::puts(
-        "Stale buffer dimensions, four rotations, resize races and presentation retirement passed");
+        "Idle geometry checks, cached capabilities, four rotations, late resize races, zero extent "
+        "and presentation "
+        "retirement passed");
 }

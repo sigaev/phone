@@ -29,6 +29,7 @@ using common::Owner;
 using common::Result;
 namespace {
 constexpr int kLifecycleTimeoutSeconds = 3;
+constexpr int kSurfaceCheckMilliseconds = 100;
 constexpr char kRedrawTimeoutError[] = "Timed out waiting for the window to redraw";
 constexpr char kSnapshotTimeoutError[] = "Timed out waiting for the Activity state";
 [[noreturn]] void stop_unresponsive_worker(const char* operation) {
@@ -49,6 +50,7 @@ enum class CommandKind {
     kRedraw,
     kLifecycleTimeout,
     kSnapshot,
+    kVisible,
     kResume,
     kContent,
     kActivate,
@@ -103,7 +105,8 @@ struct Runtime {
     Owner<Scene> scene;
     AChoreographer* choreographer = nullptr;
     gpu::Rect content;
-    bool resumed = false, stopping = false, frame_pending = false, dirty_count = false;
+    bool visible = false, resumed = false, stopping = false, frame_pending = false;
+    bool dirty_count = false;
     bool dirty_visual = false;
     unsigned redraw_sequence = 0;
     bool dragging = false;
@@ -282,6 +285,37 @@ void schedule_frame(Runtime& r) {
         AChoreographer_postFrameCallback(r.choreographer, on_frame, &r);
     }
 }
+bool needs_surface_check(const Runtime& r) {
+    return !r.stopping && r.scene && r.state.error.empty() &&
+           (r.visible || r.resumed || r.dirty_visual);
+}
+void check_surface(Runtime& r) {
+    if (!needs_surface_check(r))
+        return;
+    auto changed = gpu::surface_changed(*r.renderer);
+    if (!changed) {
+        r.state.error = changed.error().message;
+        publish(r);
+        return;
+    }
+    if (*changed) {
+        r.state.pressed = Control::kNone;
+        r.dragging = false;
+        r.dirty_visual = true;
+    }
+    // This also retries required redraws if Choreographer has stopped. A clean,
+    // unchanged paused window needs neither GPU work nor a main-thread wakeup.
+    if (r.dirty_visual) {
+        record_result(r, draw(r, false));
+        publish(r);
+        schedule_frame(r);
+    }
+}
+int64_t monotonic_milliseconds() {
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return int64_t(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+}
 void release_surface(Runtime& r) {
     r.scene.reset();
     r.renderer.reset();
@@ -339,6 +373,11 @@ int process_commands(int, int, void* data) {
                 break;
             case CommandKind::kSnapshot:
                 // A lifecycle snapshot must include queued input and startup loading.
+                break;
+            case CommandKind::kVisible:
+                r.visible = command.value;
+                if (r.visible)
+                    r.dirty_visual = true;
                 break;
             case CommandKind::kResume:
                 r.resumed = command.value;
@@ -429,8 +468,25 @@ void* worker(void* data) {
         r.stopping = true;
     }
     publish(r);
-    while (!r.stopping)
-        ALooper_pollOnce(-1, nullptr, nullptr, nullptr);
+    int64_t next_surface_check = 0;
+    while (!r.stopping) {
+        int timeout = -1;
+        if (needs_surface_check(r)) {
+            auto now = monotonic_milliseconds();
+            if (!next_surface_check)
+                next_surface_check = now + kSurfaceCheckMilliseconds;
+            timeout = int(std::max<int64_t>(0, next_surface_check - now));
+        } else {
+            next_surface_check = 0;
+        }
+        ALooper_pollOnce(timeout, nullptr, nullptr, nullptr);
+        // Use a deadline, not just POLL_TIMEOUT: unrelated looper events must not
+        // starve geometry checks. Recheck visibility after processing commands.
+        if (next_surface_check && monotonic_milliseconds() >= next_surface_check) {
+            next_surface_check = 0;
+            check_surface(r);
+        }
+    }
     if (looper)
         ALooper_removeFd(looper, r.commands_fd);
     pthread_mutex_lock(&r.mutex);
@@ -565,6 +621,11 @@ Result<void> detach_surface(Runtime& r) {
 }
 Result<void> redraw(Runtime& r) {
     return synchronize(r, CommandKind::kRedraw);
+}
+void set_visible(Runtime& r, bool visible) {
+    Command command{CommandKind::kVisible};
+    command.value = visible;
+    enqueue(r, std::move(command));
 }
 void set_resumed(Runtime& r, bool resumed) {
     Command command{CommandKind::kResume};
