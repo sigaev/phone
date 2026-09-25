@@ -13,9 +13,7 @@ constexpr std::uint32_t kSceneFragment[] =
 constexpr std::uint32_t kSkyFragment[] =
 #include "native_buttons/sky_frag.inc"
     ;
-}  // namespace
-
-gpu::SceneShaders get_scene_shaders() {
-    return {kMeshVertex, kSceneFragment, kSkyFragment};
 }
-}  // namespace native_buttons
+
+gpu::SceneShaders get_scene_shaders() { return {kMeshVertex, kSceneFragment, kSkyFragment}; }
+}

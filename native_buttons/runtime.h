@@ -11,13 +11,14 @@ struct ANativeWindow;
 
 namespace native_buttons {
 struct Runtime;
+
 struct RuntimeState : SessionState {
-    Control pressed = Control::kNone;
-    Control focused = Control::kNone;
-    bool saved = true;
-    unsigned frames = 0;
-    gpu::Rect safe;
-    std::string error, save_error;
+  Control pressed = Control::kNone;
+  Control focused = Control::kNone;
+  bool saved = true;
+  unsigned frames = 0;
+  gpu::Rect safe;
+  std::string error, save_error;
 };
 enum class Key { kNext, kPrevious, kActivate };
 enum class Touch { kDown, kMove, kUp, kCancel };
@@ -53,4 +54,4 @@ RuntimeState get_state(Runtime& runtime);
 common::Result<RuntimeState> capture_state(Runtime& runtime);
 int notification_fd(const Runtime& runtime);
 void acknowledge_notifications(Runtime& runtime);
-}  // namespace native_buttons
+}

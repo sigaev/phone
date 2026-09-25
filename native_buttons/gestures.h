@@ -4,6 +4,7 @@
 #include "common/result.h"
 
 struct AInputEvent;
+
 namespace native_buttons {
 struct Runtime;
 struct Gestures;
@@ -12,4 +13,4 @@ void destroy(Gestures* gestures) noexcept;
 void handle_motion(Gestures& gestures, const AInputEvent& event);
 void cancel_gestures(Gestures& gestures);
 void set_gesture_slop(Gestures& gestures, float pixels);
-}  // namespace native_buttons
+}

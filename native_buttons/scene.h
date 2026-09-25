@@ -7,7 +7,8 @@ namespace gpu {
 struct Renderer;
 struct Rect;
 struct SceneShaders;
-}  // namespace gpu
+}
+
 namespace native_buttons {
 struct Scene;
 enum class Bird { kPelican, kFlamingo };
@@ -23,4 +24,4 @@ common::Result<bool> render_scene(Scene& scene, double time, float yaw, bool max
                                   int pressed, float fps, bool paused, gpu::Rect content,
                                   bool saved = true, bool overlay = true, float density = 1,
                                   float zoom = 1, Bird bird = Bird::kFlamingo);
-}  // namespace native_buttons
+}

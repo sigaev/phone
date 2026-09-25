@@ -2,17 +2,21 @@
 
 namespace gpu {
 inline constexpr float kPi = 3.14159265358979323846f;
+
 struct Vec3 {
-    float x = 0, y = 0, z = 0;
+  float x = 0, y = 0, z = 0;
 };
+
 struct Color {
-    float r, g, b, a = 1;
+  float r, g, b, a = 1;
 };
+
 struct Rect {
-    float x = 0, y = 0, w = 0, h = 0;
+  float x = 0, y = 0, w = 0, h = 0;
 };
+
 struct Mat4 {
-    float v[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+  float v[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 };
 
 Vec3 operator+(Vec3 a, Vec3 b);
@@ -40,4 +44,4 @@ Mat4 between(Vec3 a, Vec3 b, float radius);
 Mat4 perspective(float fov, float aspect, float near, float far);
 Mat4 ortho(float left, float right, float bottom, float top, float near, float far);
 Mat4 look_at(Vec3 eye, Vec3 center, Vec3 up = {0, 1, 0});
-}  // namespace gpu
+}

@@ -12,21 +12,24 @@ struct ANativeWindow;
 
 namespace gpu {
 struct Renderer;
+
 struct SceneShaders {
-    std::span<const std::uint32_t> vertex;
-    std::span<const std::uint32_t> fragment;
-    std::span<const std::uint32_t> sky;
+  std::span<const std::uint32_t> vertex;
+  std::span<const std::uint32_t> fragment;
+  std::span<const std::uint32_t> sky;
 };
 enum class Shape { kSphere, kLowSphere, kTorus, kCylinder, kCone, kPlane, kFeather, kCount };
 using MeshId = unsigned;
+
 struct Vertex {
-    Vec3 position, normal;
+  Vec3 position, normal;
 };
+
 struct RenderStats {
-    int width, height, render_width, render_height, samples, particles;
-    unsigned triangles;
-    float gpu_ms;
-    bool has_gpu_timer;
+  int width, height, render_width, render_height, samples, particles;
+  unsigned triangles;
+  float gpu_ms;
+  bool has_gpu_timer;
 };
 
 common::Result<common::Owner<Renderer>> create_renderer(ANativeWindow* window, SceneShaders shaders,
@@ -61,4 +64,4 @@ common::Result<void> wait_frame(Renderer& renderer);
 common::Result<void> read_pixels(Renderer& renderer, std::span<unsigned char> rgba);
 RenderStats get_stats(const Renderer& renderer);
 std::string_view get_device(const Renderer& renderer);
-}  // namespace gpu
+}

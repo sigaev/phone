@@ -6,10 +6,10 @@
 namespace common {
 
 struct Error {
-    std::string message;
+  std::string message;
 };
 
 template <typename T>
 using Result = std::expected<T, Error>;
 
-}  // namespace common
+}

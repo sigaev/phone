@@ -28,8 +28,10 @@
 - Verify formatting with `clang-format --dry-run --Werror` and
   `buildifier -mode=check`. Do not format downloaded dependencies or generated
   build outputs.
-- Use readable, normally spaced statements and blocks; do not compress functions
-  or control flow onto one line.
+- Use two-space indentation without tabs and readable, normally spaced statements.
+  Short functions, blocks, and control flow may share a line as permitted by
+  `.clang-format`. Separate function definitions with a blank line and omit
+  comments on closing namespace braces.
 
 ## C++ style and API design
 
