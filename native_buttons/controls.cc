@@ -9,29 +9,45 @@ OverlayLayout layout_overlay(gpu::Rect safe, float density) {
     OverlayLayout layout{{}, {}, s, OverlayMode::kPortrait};
     // Preserve physical target sizes. A short window gets a horizontal toolbar,
     // and landscape gets a side panel instead of shrinking the portrait design.
-    bool landscape = safe.w > safe.h && safe.w >= 480 * s;
+    bool landscape = safe.w > safe.h && safe.w >= 560 * s;
     if (safe.w < 300 * s || safe.h < (landscape ? 280 : 420) * s) {
         layout.mode = OverlayMode::kCompact;
-        bool single_row = safe.w >= 264 * s;
-        float height = (single_row ? 96 : 156) * s;
+        bool single_row = safe.w >= 424 * s || (safe.h < 172 * s && safe.w >= 304 * s);
+        bool three_rows =
+            (safe.w < 196 * s && safe.h >= 200 * s) || (safe.w < 300 * s && safe.h >= 232 * s);
+        bool tight_two = !three_rows && safe.w < 196 * s;
+        bool tight_rows = three_rows && safe.h < 232 * s;
+        float row_step = (tight_rows ? 52 : tight_two ? 56 : 60) * s;
+        float header = (tight_rows || tight_two ? 24 : 40) * s;
+        float height = header + 56 * s + (single_row ? 0 : three_rows ? 2 : 1) * row_step;
         layout.panel = {safe.x + 8 * s, safe.y + safe.h - height - 8 * s, safe.w - 16 * s, height};
-        float width = single_row ? (layout.panel.w - 40 * s) / 4 : (layout.panel.w - 24 * s) / 2;
-        float x = layout.panel.x + 8 * s, y = layout.panel.y + 40 * s;
-        float add_x = single_row ? x + 2 * (width + 8 * s) : x;
-        float add_y = single_row ? y : y + 60 * s;
-        layout.controls = {{add_x, add_y, width, 48 * s},
-                           {add_x + width + 8 * s, add_y, width, 48 * s},
+        // Three 48-dp targets also fit a 160-dp-wide short window by using
+        // the panel's full width; rounded corners still separate the buttons.
+        float gap = tight_two ? 0 : 8 * s;
+        float x = layout.panel.x + gap, y = layout.panel.y + header;
+        float row_width = layout.panel.w - 2 * gap;
+        int columns = single_row ? 5 : three_rows ? 2 : 3;
+        float width = (row_width - (columns - 1) * gap) / columns;
+        float stride = width + gap;
+        float add_width = single_row ? width : (row_width - 8 * s) / 2;
+        float add_x = single_row ? x + 3 * stride : x;
+        float add_y = single_row ? y : y + (three_rows ? 2 : 1) * row_step;
+        layout.controls = {{add_x, add_y, add_width, 48 * s},
+                           {add_x + add_width + 8 * s, add_y, add_width, 48 * s},
                            {x, y, width, 48 * s},
-                           {x + width + 8 * s, y, width, 48 * s}};
+                           {x + stride, y, width, 48 * s},
+                           {three_rows ? x : x + 2 * stride, three_rows ? y + row_step : y,
+                            three_rows ? row_width : width, 48 * s}};
     } else if (landscape) {
         layout.mode = OverlayMode::kLandscape;
-        layout.panel = {safe.x + safe.w - 264 * s, safe.y + (safe.h - 256 * s) * .5f, 248 * s,
+        layout.panel = {safe.x + safe.w - 296 * s, safe.y + (safe.h - 256 * s) * .5f, 280 * s,
                         256 * s};
         float x = layout.panel.x + 16 * s, y = layout.panel.y;
-        layout.controls = {{x, y + 192 * s, 102 * s, 48 * s},
-                           {x + 114 * s, y + 192 * s, 102 * s, 48 * s},
-                           {x, y + 132 * s, 102 * s, 48 * s},
-                           {x + 114 * s, y + 132 * s, 102 * s, 48 * s}};
+        layout.controls = {{x, y + 192 * s, 118 * s, 48 * s},
+                           {x + 130 * s, y + 192 * s, 118 * s, 48 * s},
+                           {x, y + 132 * s, 77 * s, 48 * s},
+                           {x + 85 * s, y + 132 * s, 77 * s, 48 * s},
+                           {x + 170 * s, y + 132 * s, 78 * s, 48 * s}};
     } else {
         float width = std::min(360 * s, std::max(0.f, safe.w - 32 * s));
         float x = safe.x + (safe.w - width) * .5f;
@@ -40,12 +56,12 @@ OverlayLayout layout_overlay(gpu::Rect safe, float density) {
         float reset_width = std::max(48 * s, inner * .275f);
         float add_width = inner - gap - reset_width;
         float y = layout.panel.y + 88 * s;
-        float quality_width = std::min(114 * s, (width - 32 * s) * .5f);
+        float toggle_width = (width - 36 * s) / 3;
         layout.controls = {{x + 20 * s, y, add_width, 48 * s},
                            {x + 20 * s + add_width + gap, y, reset_width, 48 * s},
-                           {x + 10 * s, safe.y + 141 * s, quality_width, 48 * s},
-                           {x + 22 * s + quality_width, safe.y + 141 * s,
-                            std::min(84 * s, quality_width), 48 * s}};
+                           {x + 10 * s, safe.y + 141 * s, toggle_width, 48 * s},
+                           {x + 18 * s + toggle_width, safe.y + 141 * s, toggle_width, 48 * s},
+                           {x + 26 * s + 2 * toggle_width, safe.y + 141 * s, toggle_width, 48 * s}};
     }
     return layout;
 }
@@ -61,6 +77,8 @@ Control hit_test(Controls c, float x, float y) {
         return Control::kQuality;
     if (gpu::contains(c.pause, x, y))
         return Control::kPause;
+    if (gpu::contains(c.bird, x, y))
+        return Control::kBird;
     return Control::kNone;
 }
 gpu::Rect safe_area(gpu::Rect content, int width, int height) {

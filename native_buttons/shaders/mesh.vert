@@ -27,8 +27,9 @@ layout(push_constant) uniform Pass {
 };
 void main() {
     vec4 p = a_model * vec4(a_position, 1.);
-    if (a_material.w > 3.5 && a_material.w < 4.5) {
-        float bend = smoothstep(2.12, 3.12, p.y);
+    if ((a_material.w > 3.5 && a_material.w < 4.5) || a_material.w > 5.5) {
+        float bend = a_material.w > 5.5 ? smoothstep(2.10, 3.62, a_position.y)
+                                        : smoothstep(2.12, 3.12, a_position.y);
         p.x += .065 * sin(u_time * 1.4) * bend;
         p.z += .035 * sin(u_time * .9) * bend;
     }

@@ -3,9 +3,9 @@
 #include "common/gpu/math.h"
 
 namespace native_buttons {
-enum class Control : int { kNone, kAdd, kReset, kQuality, kPause };
+enum class Control : int { kNone, kAdd, kReset, kQuality, kPause, kBird };
 struct Controls {
-    gpu::Rect add, reset, quality, pause;
+    gpu::Rect add, reset, quality, pause, bird;
 };
 enum class OverlayMode { kPortrait, kLandscape, kCompact };
 struct OverlayLayout {

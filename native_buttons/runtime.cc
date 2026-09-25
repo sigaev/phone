@@ -161,6 +161,9 @@ void apply_control(Runtime& r, Control control) {
         case Control::kQuality:
             r.state.maximum = !r.state.maximum;
             break;
+        case Control::kBird:
+            r.state.bird = r.state.bird == Bird::kFlamingo ? Bird::kPelican : Bird::kFlamingo;
+            break;
         case Control::kPause:
             r.state.paused = !r.state.paused;
             reset_timing(r);
@@ -171,18 +174,18 @@ void apply_control(Runtime& r, Control control) {
     persist(r);
 }
 void apply_key(Runtime& r, Key action) {
-    constexpr Control order[] = {Control::kQuality, Control::kPause, Control::kAdd,
+    constexpr Control order[] = {Control::kQuality, Control::kPause, Control::kBird, Control::kAdd,
                                  Control::kReset};
     if (action == Key::kActivate) {
         apply_control(r, r.state.focused);
         return;
     }
     int index = -1;
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 5; ++i)
         if (order[i] == r.state.focused)
             index = i;
     bool reverse = action == Key::kPrevious;
-    int target = index < 0 ? (reverse ? 3 : 0) : (index + (reverse ? 3 : 1)) % 4;
+    int target = index < 0 ? (reverse ? 4 : 0) : (index + (reverse ? 4 : 1)) % 5;
     r.state.focused = order[target];
 }
 void apply_touch(Runtime& r, const Command& command) {
@@ -228,7 +231,7 @@ Result<void> draw(Runtime& r, bool wait) {
     Control highlighted = r.state.pressed == Control::kNone ? r.state.focused : r.state.pressed;
     auto result = render_scene(*r.scene, r.state.time, r.state.yaw, r.state.maximum, r.state.count,
                                static_cast<int>(highlighted), r.fps, r.state.paused, r.content,
-                               r.state.saved, true, r.density, r.state.zoom);
+                               r.state.saved, true, r.density, r.state.zoom, r.state.bird);
     if (!result)
         return std::unexpected(result.error());
     if (!*result)
@@ -448,7 +451,7 @@ int process_commands(int, int, void* data) {
 }
 void* worker(void* data) {
     auto& r = *static_cast<Runtime*>(data);
-    pthread_setname_np(pthread_self(), "pelican-render");
+    pthread_setname_np(pthread_self(), "bird-render");
     auto count = load_count(r.directory.c_str());
     r.state.count = r.restored >= 0 ? std::clamp(r.restored, 0, 999999) : count.value_or(0);
     if (!count) {
@@ -551,7 +554,8 @@ Result<void> synchronize(Runtime& r, CommandKind kind) {
 Result<Owner<Runtime>> create_runtime(const char* directory, SessionState restored) {
     if (restored.count < -1 || restored.count > 999999 || !std::isfinite(restored.yaw) ||
         !std::isfinite(restored.time) || restored.time < 0 || !std::isfinite(restored.zoom) ||
-        restored.zoom < kMinimumZoom || restored.zoom > kMaximumZoom)
+        restored.zoom < kMinimumZoom || restored.zoom > kMaximumZoom ||
+        (restored.bird != Bird::kPelican && restored.bird != Bird::kFlamingo))
         return std::unexpected(Error{"Invalid restored session state"});
     Owner<Runtime> runtime(new (std::nothrow) Runtime);
     if (!runtime)

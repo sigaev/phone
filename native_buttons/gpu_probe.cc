@@ -42,6 +42,7 @@ unsigned validation_error_count();
 #endif
 
 namespace {
+using native_buttons::Bird;
 common::Result<void> require_frame(common::Result<bool> result) {
     if (!result)
         return std::unexpected(result.error());
@@ -97,12 +98,13 @@ common::Result<void> exercise_renderer() {
         std::vector<unsigned char> pixels(size_t(width) * height * 4);
         for (int i = 0; i < 12; ++i) {
             bool maximum = i >= 4 && i < 8;
-            auto rendered = require_frame(
-                native_buttons::render_scene(**scene, 2.f + i * .25f, .34f, maximum, 7, 0, 60,
-                                             false, {0, 0, float(width), float(height)}));
+            Bird bird = i % 4 < 2 ? Bird::kPelican : Bird::kFlamingo;
+            auto rendered = require_frame(native_buttons::render_scene(
+                **scene, 2.f + i * .25f, .34f, maximum, 7, 0, 60, false,
+                {0, 0, float(width), float(height)}, true, true, 1, 1, bird));
             if (!rendered)
                 return rendered;
-            if (i % 4 == 3) {
+            if (i % 2 == 1) {
                 if (auto captured = gpu::read_pixels(**renderer, pixels); !captured)
                     return captured;
                 int darkest = 255, brightest = 0;
@@ -119,7 +121,8 @@ common::Result<void> exercise_renderer() {
                     return std::unexpected(common::Error{"Rendered scene is blank"});
                 auto stats = gpu::get_stats(**renderer);
                 if (stats.samples != 4 || stats.particles != (maximum ? 65536 : 16384) ||
-                    stats.triangles != (maximum ? 869830u : 747078u))
+                    stats.triangles != (bird == Bird::kPelican ? (maximum ? 869830u : 747078u)
+                                                               : (maximum ? 862150u : 739398u)))
                     return std::unexpected(common::Error{"Scene workload changed unexpectedly"});
             }
         }
@@ -127,10 +130,11 @@ common::Result<void> exercise_renderer() {
         // excluded. Equal timestamps must reproduce an image; advancing time must
         // change it. Long timestamps also exercise the scenery's wrapping logic.
         for (bool maximum : {false, true}) {
-            auto capture = [&](double time, float zoom = 1) -> common::Result<void> {
+            auto capture = [&](double time, float zoom = 1,
+                               Bird bird = Bird::kFlamingo) -> common::Result<void> {
                 if (auto rendered = require_frame(native_buttons::render_scene(
                         **scene, time, .34f, maximum, 7, 0, 60, false,
-                        {0, 0, float(width), float(height)}, true, false, 1, zoom));
+                        {0, 0, float(width), float(height)}, true, false, 1, zoom, bird));
                     !rendered)
                     return rendered;
                 return gpu::read_pixels(**renderer, pixels);
@@ -142,6 +146,19 @@ common::Result<void> exercise_renderer() {
                 return result;
             if (pixels != reference)
                 return std::unexpected(common::Error{"Frozen scene changed without input"});
+            if (auto result = capture(120.f, 1, Bird::kPelican); !result)
+                return result;
+            if (pixels == reference)
+                return std::unexpected(common::Error{"Bird selector did not change the scene"});
+            auto pelican = pixels;
+            if (auto result = capture(120.5f, 1, Bird::kPelican); !result)
+                return result;
+            if (pixels == pelican)
+                return std::unexpected(common::Error{"Pelican animation is frozen"});
+            if (auto result = capture(120.f); !result)
+                return result;
+            if (pixels != reference)
+                return std::unexpected(common::Error{"Switching birds changed the frozen scene"});
             for (float zoom : {native_buttons::kMinimumZoom, native_buttons::kMaximumZoom}) {
                 if (auto result = capture(120.f, zoom); !result)
                     return result;
@@ -260,6 +277,9 @@ common::Result<void> run_probe(int argc, char** argv) {
     double start_time = argc > 5 ? std::strtod(argv[5], nullptr) : 2.;
     float density = argc > 6 ? std::strtof(argv[6], nullptr) : std::min(width, height) / 360.f;
     float zoom = argc > 7 ? std::strtof(argv[7], nullptr) : 1;
+    if (argc > 8 && std::strcmp(argv[8], "pelican") != 0 && std::strcmp(argv[8], "flamingo") != 0)
+        return std::unexpected(common::Error{"Bird must be pelican or flamingo"});
+    Bird bird = argc > 8 && std::strcmp(argv[8], "pelican") == 0 ? Bird::kPelican : Bird::kFlamingo;
     if (width < 1 || height < 1 || width > 4096 || height > 4096)
         return std::unexpected(common::Error{"Invalid image dimensions"});
     if (!std::isfinite(start_time) || start_time < 0)
@@ -282,9 +302,10 @@ common::Result<void> run_probe(int argc, char** argv) {
     float fps = 0;
     for (int i = 0; i < 90; ++i) {
         double time = start_time + i / 60.;
-        auto result = require_frame(native_buttons::render_scene(
-            **scene, time, .34f, maximum, 7, 0, fps, false,
-            {0, 24 * density, float(width), height - 48 * density}, true, true, density, zoom));
+        auto result = require_frame(
+            native_buttons::render_scene(**scene, time, .34f, maximum, 7, 0, fps, false,
+                                         {0, 24 * density, float(width), height - 48 * density},
+                                         true, true, density, zoom, bird));
         if (!result)
             return std::unexpected(result.error());
         if (auto waited = gpu::wait_frame(**renderer); !waited)

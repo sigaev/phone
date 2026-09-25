@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <numbers>
+#include <string>
 #include <vector>
 
 #include "common/gpu/renderer.h"
@@ -17,10 +18,14 @@ struct Renderer {
     bool defer_present = false;
     std::vector<float> islands, rocks;
     Vec3 eye;
+    std::vector<std::string> labels;
+    std::vector<MeshId> meshes;
 };
 void clear_instances(Renderer& r) {
     r.islands.clear();
     r.rocks.clear();
+    r.labels.clear();
+    r.meshes.clear();
 }
 void set_transform(Renderer&, Mat4) {
 }
@@ -30,7 +35,8 @@ void add(Renderer& r, Shape, Mat4 model, Color color, float, float, float, float
     if (color.r == .21f && color.g == .27f && color.b == .26f)
         r.rocks.push_back(model.v[12]);
 }
-void add(Renderer&, MeshId, Mat4, Color, float, float, float, float) {
+void add(Renderer& r, MeshId mesh, Mat4, Color, float, float, float, float) {
+    r.meshes.push_back(mesh);
 }
 common::Result<MeshId> create_mesh(Renderer& r, std::span<const Vertex> vertices,
                                    std::span<const unsigned> indices) {
@@ -53,7 +59,8 @@ common::Result<bool> present(Renderer& r) {
 }
 void draw_rect(Renderer&, Rect, float, Color) {
 }
-void draw_text(Renderer&, const char*, float, float, float, Color, bool) {
+void draw_text(Renderer& r, const char* text, float, float, float, Color, bool) {
+    r.labels.emplace_back(text);
 }
 RenderStats get_stats(const Renderer& r) {
     return {r.width, r.height, r.width, r.height, 4, 16384, 0, 0, false};
@@ -83,6 +90,29 @@ int main() {
             }
         }
     }
+    // Changing birds reuses prebuilt meshes and updates every species label.
+    auto mesh_count = renderer.next_mesh;
+    gpu::MeshId previous_neck = 0;
+    for (auto bird : {native_buttons::Bird::kPelican, native_buttons::Bird::kFlamingo,
+                      native_buttons::Bird::kPelican}) {
+        auto rendered = native_buttons::render_scene(**scene, 3.28, .34f, false, 0, 0, 60, true, {},
+                                                     true, true, 1, 1, bird);
+        bool flamingo = bird == native_buttons::Bird::kFlamingo;
+        const char* name = flamingo ? "Flamingo" : "Pelican";
+        const char* caption =
+            flamingo ? "A flamingo. A bicycle. No hurry." : "A pelican. A bicycle. No hurry.";
+        const char* other = flamingo ? "Pelican" : "Flamingo";
+        if (!rendered || !*rendered || renderer.next_mesh != mesh_count ||
+            renderer.meshes.empty() || renderer.meshes.front() == previous_neck ||
+            std::find(renderer.labels.begin(), renderer.labels.end(), name) ==
+                renderer.labels.end() ||
+            std::find(renderer.labels.begin(), renderer.labels.end(), caption) ==
+                renderer.labels.end() ||
+            std::find(renderer.labels.begin(), renderer.labels.end(), other) !=
+                renderer.labels.end())
+            return 14;
+        previous_neck = renderer.meshes.front();
+    }
     // A single frame must still move scenery and camera after days or a year,
     // including frames spanning either periodic clock's wrap boundary.
     for (double time : {65536., 262144., 524288., 31536000.,
@@ -108,8 +138,8 @@ int main() {
     const struct {
         float x, y;
         int expected;
-    } taps[] = {{100, 650, 1}, {310, 650, 2}, {60, 150, 3},
-                {180, 150, 4}, {1, 1, 0},     {260, 650, 0}};
+    } taps[] = {{100, 650, 1}, {310, 650, 2}, {60, 150, 3}, {180, 150, 4},
+                {300, 150, 5}, {1, 1, 0},     {260, 650, 0}};
     for (auto tap : taps)
         if (native_buttons::hit_test(**scene, tap.x, tap.y) != tap.expected)
             return 4;
@@ -129,11 +159,19 @@ int main() {
     for (float density : {1.f, 2.625f, 3.f, 4.f}) {
         for (auto size :
              {gpu::Rect{0, 0, 360, 800}, gpu::Rect{0, 0, 800, 360}, gpu::Rect{0, 0, 720, 200},
-              gpu::Rect{0, 0, 200, 300}, gpu::Rect{0, 0, 200, 800}}) {
+              gpu::Rect{0, 0, 200, 300}, gpu::Rect{0, 0, 200, 800}, gpu::Rect{0, 0, 360, 160},
+              gpu::Rect{0, 0, 200, 200}, gpu::Rect{0, 0, 300, 420}, gpu::Rect{0, 0, 160, 200},
+              gpu::Rect{0, 0, 160, 152}, gpu::Rect{0, 0, 160, 320}, gpu::Rect{0, 0, 480, 320},
+              gpu::Rect{0, 0, 560, 280}}) {
             gpu::Rect safe{10 * density, 24 * density, size.w * density, size.h * density};
-            auto c = native_buttons::layout_controls(safe, density);
-            const gpu::Rect buttons[] = {c.add, c.reset, c.quality, c.pause};
-            for (int i = 0; i < 4; ++i) {
+            auto layout = native_buttons::layout_overlay(safe, density);
+            auto panel = layout.panel;
+            if (panel.x < safe.x || panel.y < safe.y || panel.x + panel.w > safe.x + safe.w ||
+                panel.y + panel.h > safe.y + safe.h)
+                return 15;
+            auto c = layout.controls;
+            const gpu::Rect buttons[] = {c.add, c.reset, c.quality, c.pause, c.bird};
+            for (int i = 0; i < 5; ++i) {
                 auto a = buttons[i];
                 if (a.w < 48 * density || a.h < 48 * density || a.x < safe.x || a.y < safe.y ||
                     a.x + a.w > safe.x + safe.w || a.y + a.h > safe.y + safe.h)
@@ -141,7 +179,7 @@ int main() {
                 if (static_cast<int>(
                         native_buttons::hit_test(c, a.x + a.w * .5f, a.y + a.h * .5f)) != i + 1)
                     return 8;
-                for (int j = i + 1; j < 4; ++j) {
+                for (int j = i + 1; j < 5; ++j) {
                     auto b = buttons[j];
                     if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h)
                         return 9;

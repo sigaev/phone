@@ -1,16 +1,18 @@
 # native_buttons
 
-A native C++23 Android app with an animated 3D pelican riding a bicycle along
-a coastal causeway. The scene fills the window in both orientations, with
+A native C++23 Android app with an animated 3D pelican or flamingo riding a bicycle
+along a coastal causeway. The scene fills the window in both orientations, with
 translucent controls floating over it: a bottom panel in portrait and a side
 panel in landscape. The app requests no permissions and works offline.
 
 Rendering uses hardware Vulkan 1.1, with instanced geometry,
 physically based lighting, animated water, soft shadow mapping, floating-point
 HDR targets, multisample antialiasing, bloom, and compute-driven particles.
-The reusable renderer lives in `//common/gpu`; the pelican, bicycle, scenery,
-animation shaders, and controls live in this directory. The pelican pedals,
-breathes, blinks, and flexes its neck and wings; its scarf deforms on the GPU.
+The reusable renderer lives in `//common/gpu`; the birds, bicycle, scenery,
+animation shaders, and controls live in this directory. The flamingo
+has soft pink plumage, a slender curved neck, and a short dark-tipped beak. It
+pedals, breathes, and flexes its neck and wings; its large eyes glance around,
+blink, and flutter. Its mint scarf deforms on the GPU.
 There is no software rasterizer.
 On-screen rendering requires `VK_EXT_swapchain_maintenance1` and its instance
 dependencies. Presentation fences keep swapchain images and semaphores alive
@@ -25,7 +27,7 @@ Java application sources or DEX code. Tab/Shift+Tab and arrow keys move focus;
 Enter, Space, or the D-pad center activates the focused control. These GPU-drawn
 controls still do not expose TalkBack accessibility nodes.
 
-The camera circles the pelican once per minute with a gentle rise and fall and
+The camera circles the selected bird once per minute with a gentle rise and fall and
 small distance changes. Drag to adjust the view through a full circle. Spread
 two fingers to zoom in and pinch them together to zoom out, from 0.5x to 2.5x.
 Pinching cancels pending button taps and keeps the controls at their normal size.
@@ -37,6 +39,11 @@ A paused scene needs GPU work only for a changed surface or pending redraw. This
 also covers visible but inactive split-screen windows. Monitoring stops when the Activity
 is hidden or the surface is detached, and resumes when it becomes visible.
 The feet and crank arms share the same forward-pedaling motion.
+Tap **Flamingo / Pelican** beside the detail and pause controls to switch birds.
+The selector shows the current bird, and the scene caption follows it. Switching
+works while paused and preserves the counter, detail level, animation time, yaw,
+and zoom. Each bird has its own neck shape and camera framing. Both meshes are
+created with the scene, so switching needs no resource rebuild.
 **High detail** uses native resolution,
 4x MSAA, 2048-pixel shadows, and 16,384 particles. **Ultra detail** uses
 130% resolution, 4096-pixel shadows, more scenery, and 65,536 particles.
@@ -71,9 +78,11 @@ advancing paused animation, yaw, or zoom. The camera
 and scene use the full window; only the overlays respect content insets.
 Controls retain at least 48 dp touch targets. Short windows use a compact
 translucent toolbar instead of shrinking the buttons.
-Android's saved Activity state includes the count, detail setting, pause state,
-camera yaw, zoom, and animation time in a validated, versioned record. Version 1
+Android's saved Activity state includes the count, selected bird, detail setting,
+pause state, camera yaw, zoom, and animation time in a validated, versioned record. Version 1
 records use the default zoom; legacy count-only records remain supported too.
+Version 4 adds the bird selection without increasing the record size. Older
+records restore the pelican; new sessions start with the flamingo.
 Animation time is accumulated and saved in double precision. CPU and shader
 oscillations use a shared bounded phase, while scenery, camera orbit, road
 markings, and particles retain their own cycles, so long sessions keep animating
@@ -119,13 +128,15 @@ targets, synchronization and readback, and can save a PPM screenshot before inst
 
 ```sh
 bazel run //native_buttons:gpu_probe --platforms=//:arm64-v8a \
-    --run_under=//tools:android_test_runner -- /tmp/pelican.ppm 1080 2400 0
+    --run_under=//tools:android_test_runner -- /tmp/flamingo.ppm 1080 2400 0
 ```
 
 Use `1` instead of `0` for Ultra detail. Optional arguments after the quality
-flag set the animation start time in seconds, pixels per dp, and zoom. The default
-density gives the shorter image dimension a width of 360 dp. For example,
-`/tmp/landscape.ppm 960 432 0 12 1.2 1.5` renders an 800-by-360 dp landscape view at 1.5x zoom.
+flag set the animation start time in seconds, pixels per dp, zoom, and `pelican`
+or `flamingo` (the default). The default density gives the shorter image dimension
+a width of 360 dp. For example,
+`/tmp/landscape.ppm 960 432 0 12 1.2 1.5 pelican` renders the pelican in an
+800-by-360 dp landscape view at 1.5x zoom.
 Probe throughput is a synchronous
 offscreen measurement, not a claim about the installed app's sustained frame
 rate. Display composition, thermal limits, and frame pacing affect the app.
@@ -164,9 +175,12 @@ single-finger taps after pinching, and chronological processing of batched motio
 The real-worker tests check batched excursions that return inside a Reset button,
 valid batched jitter, and 60 Hz clock updates after days of saved animation time.
 Application tests cover zoom limits, paused zooming, accidental-tap prevention,
-and zoom restoration across recreation.
+and zoom restoration across recreation. They also check touch and keyboard bird
+selection while paused, selection restoration, matching captions, and usable
+selector hit regions across compact, portrait, and landscape layouts.
 GPU tests exercise portrait and landscape offscreen targets, preparation boundaries, quality changes,
-readback, camera zoom at both limits, and fixed-quality animation with
+readback, both bird workloads, switching birds at a frozen timestamp, camera zoom
+at both limits, and fixed-quality animation with
 the changing UI excluded. Fixed-camera captures also check shader-driven motion
 at large timestamps and across phase wraps. The depth-fallback test simulates
 unsupported D24S8 and renders with another format on the real GPU.
@@ -221,6 +235,9 @@ local demo key: Android cannot install it as an update over that older APK.
 Uninstalling the older app removes its saved count.
 
 ## Historical Vulkan migration measurements
+
+These measurements describe the pelican scene. The flamingo option
+has a different mesh workload: 739,398 triangles in High and 862,150 in Ultra.
 
 Measured on this Pixel 8 Pro / Mali-G715, comparing the saved release from commit
 `62d0917` with the Vulkan release. Both executables ran locally from Android's

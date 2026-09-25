@@ -5,6 +5,7 @@
 #include <span>
 
 #include "common/result.h"
+#include "native_buttons/scene.h"
 
 namespace native_buttons {
 struct SessionState {
@@ -14,6 +15,7 @@ struct SessionState {
     float yaw = .34f;
     double time = 0;
     float zoom = 1;
+    Bird bird = Bird::kFlamingo;
 };
 using SavedState = std::array<std::byte, 32>;
 SavedState encode_state(const SessionState& state);

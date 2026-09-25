@@ -10,6 +10,7 @@ struct SceneShaders;
 }  // namespace gpu
 namespace native_buttons {
 struct Scene;
+enum class Bird { kPelican, kFlamingo };
 inline constexpr float kMinimumZoom = .5f, kMaximumZoom = 2.5f;
 gpu::SceneShaders get_scene_shaders();
 common::Result<common::Owner<Scene>> create_scene(gpu::Renderer& renderer);
@@ -21,5 +22,5 @@ int hit_test(const Scene& scene, float x, float y);
 common::Result<bool> render_scene(Scene& scene, double time, float yaw, bool maximum, int count,
                                   int pressed, float fps, bool paused, gpu::Rect content,
                                   bool saved = true, bool overlay = true, float density = 1,
-                                  float zoom = 1);
+                                  float zoom = 1, Bird bird = Bird::kFlamingo);
 }  // namespace native_buttons

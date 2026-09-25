@@ -59,13 +59,14 @@ Result<void> check_runtime(const char* path) {
         key(r, Key::kNext);
         key(r, Key::kNext);
         key(r, Key::kNext);
+        key(r, Key::kNext);
         key(r, Key::kActivate);
         auto keyboard = capture_state(r);
         CHECK(keyboard && keyboard->count == 8 && keyboard->focused == Control::kAdd,
               "Keyboard activation or lifecycle snapshot omitted queued input");
         key(r, Key::kPrevious);
         auto focused = capture_state(r);
-        CHECK(focused && focused->focused == Control::kPause, "Reverse keyboard focus failed");
+        CHECK(focused && focused->focused == Control::kBird, "Reverse keyboard focus failed");
         activate(r, Control::kReset);
         for (int i = 0; i < 7; ++i)
             activate(r, Control::kAdd);
@@ -125,6 +126,20 @@ Result<void> check_runtime(const char* path) {
         CHECK(next.frames > paused.frames && next.time == paused.time,
               "Paused redraw must draw without advancing animation");
 
+        for (Bird bird : {Bird::kPelican, Bird::kFlamingo}) {
+            auto selector = layout_controls(get_state(r).safe).bird;
+            touch(r, Touch::kDown, selector.x + selector.w * .5f, selector.y + selector.h * .5f);
+            touch(r, Touch::kUp, selector.x + selector.w * .5f, selector.y + selector.h * .5f);
+            CHECK(redraw(r), "Bird selector did not redraw while paused");
+            auto selected = get_state(r);
+            CHECK(selected.bird == bird && selected.time == paused.time && selected.paused &&
+                      selected.yaw == paused.yaw && selected.zoom == paused.zoom &&
+                      selected.count == paused.count && selected.maximum == paused.maximum,
+                  "Selecting a bird changed unrelated scene state");
+        }
+        focus_control(r, Control::kBird);
+        key(r, Key::kActivate);
+        CHECK(redraw(r) && get_state(r).bird == Bird::kPelican, "Keyboard bird selection failed");
         touch(r, Touch::kDown, 100, 650);
         pinch(r, 2);
         touch(r, Touch::kUp, 100, 650);
@@ -156,7 +171,8 @@ Result<void> check_runtime(const char* path) {
         set_content(r, {});
         CHECK(set_surface(r, nullptr, 720, 320), "Cannot attach landscape target");
         CHECK(redraw(r), "Recreated landscape redraw failed");
-        CHECK(get_state(r).safe.w == 720 && get_state(r).safe.h == 320 && get_state(r).zoom == 1.5f,
+        CHECK(get_state(r).safe.w == 720 && get_state(r).safe.h == 320 &&
+                  get_state(r).zoom == 1.5f && get_state(r).bird == Bird::kPelican,
               "Recreated target kept stale dimensions or lost zoom");
         set_density(r, 2);
         CHECK(redraw(r), "Density change did not redraw the controls");
@@ -174,7 +190,7 @@ Result<void> check_runtime(const char* path) {
     CHECK(loaded && *loaded == 0, "Worker shutdown lost the saved state");
     // Destroy with a queued Choreographer callback to exercise callback lifetime.
     {
-        SessionState original{12, true, true, -1.2f, 127.5f, 1.75f};
+        SessionState original{12, true, true, -1.2f, 127.5f, 1.75f, Bird::kPelican};
         auto restored = decode_state(encode_state(original));
         CHECK(restored, "Cannot decode saved Activity state");
         auto runtime = create_runtime(path, *restored);
@@ -185,7 +201,8 @@ Result<void> check_runtime(const char* path) {
         CHECK(get_state(**runtime).count == 12, "Saved instance state was not restored");
         auto state = get_state(**runtime);
         CHECK(state.maximum && state.paused && state.yaw == original.yaw &&
-                  state.time == original.time && state.zoom == original.zoom,
+                  state.time == original.time && state.zoom == original.zoom &&
+                  state.bird == original.bird,
               "Activity recreation lost pause, quality, camera, zoom or animation state");
         activate(**runtime, Control::kPause);
         CHECK(redraw(**runtime), "Cannot queue animation before destroying the restored runtime");
