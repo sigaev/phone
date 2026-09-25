@@ -10,11 +10,16 @@ struct SceneShaders;
 }  // namespace gpu
 namespace native_buttons {
 struct Scene;
+inline constexpr float kMinimumZoom = .5f, kMaximumZoom = 2.5f;
 gpu::SceneShaders get_scene_shaders();
 common::Result<common::Owner<Scene>> create_scene(gpu::Renderer& renderer);
 void destroy(Scene* scene) noexcept;
+// Test the controls from the last successfully presented frame.
 int hit_test(const Scene& scene, float x, float y);
-common::Result<void> render_scene(Scene& scene, float time, float yaw, bool maximum, int count,
-                                  int pressed, float fps, bool paused, gpu::Rect safe,
-                                  bool saved = true, bool overlay = true);
+// Returns false when rendering must be retried after a transient surface change.
+// The content rectangle is clipped to the single prepared frame's dimensions.
+common::Result<bool> render_scene(Scene& scene, double time, float yaw, bool maximum, int count,
+                                  int pressed, float fps, bool paused, gpu::Rect content,
+                                  bool saved = true, bool overlay = true, float density = 1,
+                                  float zoom = 1);
 }  // namespace native_buttons

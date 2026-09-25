@@ -4,6 +4,7 @@ layout(set = 0, binding = 0, std140) uniform Globals {
     mat4 u_light;
     vec4 u_eye_time;
     vec4 u_size;
+    vec4 u_animation_clock;
 };
 #define u_time u_eye_time.w
 #define u_eye u_eye_time.xyz

@@ -1,3 +1,4 @@
+#include <android/configuration.h>
 #include <android/input.h>
 #include <android/log.h>
 #include <android/looper.h>
@@ -10,6 +11,7 @@
 #include <new>
 #include <string>
 
+#include "native_buttons/gestures.h"
 #include "native_buttons/runtime.h"
 
 namespace {
@@ -19,10 +21,19 @@ struct App {
     ANativeActivity* activity = nullptr;
     AInputQueue* input = nullptr;
     Owner<Runtime> runtime;
+    Owner<Gestures> gestures;
     gpu::Rect content;
     std::string last_save_error;
     bool finishing = false;
 };
+struct Configuration {
+    AConfiguration* handle;
+};
+void destroy(Configuration* configuration) noexcept {
+    if (configuration->handle)
+        AConfiguration_delete(configuration->handle);
+    delete configuration;
+}
 void destroy(App* app) noexcept {
     delete app;
 }
@@ -58,6 +69,43 @@ void report(App& app, const std::string& message, bool fatal) {
         ANativeActivity_finish(app.activity);
     }
 }
+common::Result<void> configure_input(App& app) {
+    JNIEnv* env = app.activity->env;
+    jclass type = env->FindClass("android/view/ViewConfiguration");
+    jmethodID get =
+        type && !env->ExceptionCheck()
+            ? env->GetStaticMethodID(type, "get",
+                                     "(Landroid/content/Context;)Landroid/view/ViewConfiguration;")
+            : nullptr;
+    jobject configuration = get && !env->ExceptionCheck()
+                                ? env->CallStaticObjectMethod(type, get, app.activity->clazz)
+                                : nullptr;
+    jmethodID slop = configuration && !env->ExceptionCheck()
+                         ? env->GetMethodID(type, "getScaledTouchSlop", "()I")
+                         : nullptr;
+    int pixels = slop && !env->ExceptionCheck() ? env->CallIntMethod(configuration, slop) : 0;
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        pixels = 0;
+    }
+    if (configuration)
+        env->DeleteLocalRef(configuration);
+    if (type)
+        env->DeleteLocalRef(type);
+    if (pixels <= 0)
+        return std::unexpected(common::Error{"Cannot load Android's touch configuration"});
+    Owner<Configuration> resources(new (std::nothrow) Configuration{AConfiguration_new()});
+    if (!resources || !resources->handle)
+        return std::unexpected(common::Error{"Cannot load Android's display configuration"});
+    AConfiguration_fromAssetManager(resources->handle, app.activity->assetManager);
+    int density = AConfiguration_getDensity(resources->handle);
+    if (density <= 0 || density >= ACONFIGURATION_DENSITY_ANY)
+        density = ACONFIGURATION_DENSITY_MEDIUM;
+    set_density(*app.runtime, float(density) / ACONFIGURATION_DENSITY_MEDIUM);
+    set_touch_slop(*app.runtime, float(pixels));
+    set_gesture_slop(*app.gestures, float(pixels));
+    return {};
+}
 int on_runtime_ready(int, int, void* data) {
     auto& app = *static_cast<App*>(data);
     acknowledge_notifications(*app.runtime);
@@ -77,17 +125,7 @@ int on_input_ready(int, int, void* data) {
             continue;
         int handled = 0;
         if (AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION) {
-            int action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
-            float x = AMotionEvent_getX(event, 0), y = AMotionEvent_getY(event, 0);
-            if (action == AMOTION_EVENT_ACTION_DOWN)
-                touch(*app.runtime, Touch::kDown, x, y);
-            else if (action == AMOTION_EVENT_ACTION_MOVE)
-                touch(*app.runtime, Touch::kMove, x, y);
-            else if (action == AMOTION_EVENT_ACTION_UP)
-                touch(*app.runtime, Touch::kUp, x, y);
-            else if (action == AMOTION_EVENT_ACTION_CANCEL ||
-                     action == AMOTION_EVENT_ACTION_POINTER_DOWN)
-                touch(*app.runtime, Touch::kCancel, x, y);
+            handle_motion(*app.gestures, *event);
             handled = 1;
         } else if (AInputEvent_getType(event) == AINPUT_EVENT_TYPE_KEY) {
             int code = AKeyEvent_getKeyCode(event);
@@ -117,6 +155,7 @@ void on_window_created(ANativeActivity* activity, ANativeWindow* window) {
 }
 void on_window_destroyed(ANativeActivity* activity, ANativeWindow*) {
     auto& app = *state(activity);
+    cancel_gestures(*app.gestures);
     // NativeActivity requires all drawing to stop before this callback returns.
     if (auto result = detach_surface(*app.runtime); !result && !app.finishing)
         report(app, result.error().message, true);
@@ -129,6 +168,7 @@ void on_window_redraw(ANativeActivity* activity, ANativeWindow*) {
 }
 void on_window_resized(ANativeActivity* activity, ANativeWindow*) {
     auto& app = *state(activity);
+    cancel_gestures(*app.gestures);
     set_content(*app.runtime, app.content);
 }
 void on_input_created(ANativeActivity* activity, AInputQueue* input) {
@@ -141,19 +181,27 @@ void on_input_destroyed(ANativeActivity* activity, AInputQueue* input) {
     AInputQueue_detachLooper(input);
     auto& app = *state(activity);
     app.input = nullptr;
-    touch(*app.runtime, Touch::kCancel, 0, 0);
+    cancel_gestures(*app.gestures);
 }
 void on_content_changed(ANativeActivity* activity, const ARect* rect) {
     auto& app = *state(activity);
+    cancel_gestures(*app.gestures);
     app.content = {float(rect->left), float(rect->top), float(rect->right - rect->left),
                    float(rect->bottom - rect->top)};
     set_content(*app.runtime, app.content);
 }
 void on_pause(ANativeActivity* activity) {
-    set_resumed(*state(activity)->runtime, false);
+    auto& app = *state(activity);
+    cancel_gestures(*app.gestures);
+    set_resumed(*app.runtime, false);
 }
 void on_resume(ANativeActivity* activity) {
     set_resumed(*state(activity)->runtime, true);
+}
+void on_configuration_changed(ANativeActivity* activity) {
+    auto& app = *state(activity);
+    if (auto result = configure_input(app); !result)
+        report(app, result.error().message, true);
 }
 void on_destroy(ANativeActivity* activity) {
     Owner<App> app(state(activity));
@@ -161,17 +209,23 @@ void on_destroy(ANativeActivity* activity) {
         AInputQueue_detachLooper(app->input);
     ALooper_removeFd(ALooper_forThread(), notification_fd(*app->runtime));
     activity->instance = nullptr;
-    // Runtime joins its worker before freeing callback data or window ownership.
+    // Runtime waits for the worker's final access before freeing callback data.
 }
 void* on_save_state(ANativeActivity* activity, size_t* size) {
-    int* count = static_cast<int*>(std::malloc(sizeof(int)));
-    if (!count) {
-        *size = 0;
+    *size = 0;
+    auto& app = *state(activity);
+    auto snapshot = capture_state(*app.runtime);
+    if (!snapshot) {
+        report(app, snapshot.error().message, true);
         return nullptr;
     }
-    *count = capture_state(*state(activity)->runtime).count;
-    *size = sizeof(int);
-    return count;
+    auto bytes = encode_state(*snapshot);
+    void* saved = std::malloc(bytes.size());
+    if (!saved)
+        return nullptr;
+    std::memcpy(saved, bytes.data(), bytes.size());
+    *size = bytes.size();
+    return saved;
 }
 }  // namespace
 
@@ -183,10 +237,14 @@ extern "C" __attribute__((visibility("default"))) void ANativeActivity_onCreate(
         return;
     }
     app->activity = activity;
-    int restored = -1;
-    if (saved && size == sizeof(int)) {
-        std::memcpy(&restored, saved, sizeof(int));
-        restored = std::clamp(restored, 0, 999999);
+    SessionState restored;
+    if (saved && size) {
+        auto decoded = decode_state({static_cast<const std::byte*>(saved), size});
+        if (decoded)
+            restored = *decoded;
+        else
+            __android_log_print(ANDROID_LOG_WARN, "native_buttons", "%s",
+                                decoded.error().message.c_str());
     }
     auto runtime = create_runtime(activity->internalDataPath, restored);
     if (!runtime) {
@@ -194,6 +252,16 @@ extern "C" __attribute__((visibility("default"))) void ANativeActivity_onCreate(
         return;
     }
     app->runtime = std::move(*runtime);
+    auto gestures = create_gestures(*app->runtime);
+    if (!gestures) {
+        report(*app, gestures.error().message, true);
+        return;
+    }
+    app->gestures = std::move(*gestures);
+    if (auto result = configure_input(*app); !result) {
+        report(*app, result.error().message, true);
+        return;
+    }
     if (ALooper_addFd(ALooper_forThread(), notification_fd(*app->runtime), ALOOPER_POLL_CALLBACK,
                       ALOOPER_EVENT_INPUT, on_runtime_ready, app.get()) != 1) {
         report(*app, "Cannot register application notifications", true);
@@ -209,6 +277,7 @@ extern "C" __attribute__((visibility("default"))) void ANativeActivity_onCreate(
     callbacks->onContentRectChanged = on_content_changed;
     callbacks->onPause = on_pause;
     callbacks->onResume = on_resume;
+    callbacks->onConfigurationChanged = on_configuration_changed;
     callbacks->onDestroy = on_destroy;
     callbacks->onSaveInstanceState = on_save_state;
     activity->instance = app.release();

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <numbers>
 #include <vector>
 
 #if defined(NATIVE_BUTTONS_TEST_DEPTH_FALLBACK)
@@ -41,6 +42,13 @@ unsigned validation_error_count();
 #endif
 
 namespace {
+common::Result<void> require_frame(common::Result<bool> result) {
+    if (!result)
+        return std::unexpected(result.error());
+    if (!*result)
+        return std::unexpected(common::Error{"The offscreen frame was unexpectedly deferred"});
+    return {};
+}
 #if defined(NATIVE_BUTTONS_VULKAN_VALIDATION)
 common::Result<void> prepare_validation() {
     const char* path = std::getenv("NATIVE_BUTTONS_VULKAN_LAYER_PATH");
@@ -74,22 +82,38 @@ common::Result<void> exercise_renderer() {
         auto scene = native_buttons::create_scene(**renderer);
         if (!scene)
             return std::unexpected(scene.error());
+        // A different quality request must defer instead of replacing targets
+        // after the caller has calculated its camera and layout.
+        auto before = gpu::get_stats(**renderer);
+        auto changed = gpu::render(**renderer, {0, 3, 8}, {0, 1, 0}, 0, true);
+        if (!changed)
+            return std::unexpected(changed.error());
+        if (*changed)
+            return std::unexpected(common::Error{"Rendering replaced unprepared targets"});
+        auto after = gpu::get_stats(**renderer);
+        if (after.render_width != before.render_width ||
+            after.render_height != before.render_height)
+            return std::unexpected(common::Error{"Deferred rendering changed target dimensions"});
         std::vector<unsigned char> pixels(size_t(width) * height * 4);
         for (int i = 0; i < 12; ++i) {
             bool maximum = i >= 4 && i < 8;
-            auto rendered =
+            auto rendered = require_frame(
                 native_buttons::render_scene(**scene, 2.f + i * .25f, .34f, maximum, 7, 0, 60,
-                                             false, {0, 0, float(width), float(height)});
+                                             false, {0, 0, float(width), float(height)}));
             if (!rendered)
                 return rendered;
             if (i % 4 == 3) {
                 if (auto captured = gpu::read_pixels(**renderer, pixels); !captured)
                     return captured;
                 int darkest = 255, brightest = 0;
+                // Translucent controls and font edges must preserve opaque scene alpha.
                 for (size_t byte = 0; byte < pixels.size(); ++byte)
                     if (byte % 4 != 3) {
                         darkest = std::min(darkest, int(pixels[byte]));
                         brightest = std::max(brightest, int(pixels[byte]));
+                    } else if (pixels[byte] != 255) {
+                        return std::unexpected(
+                            common::Error{"UI made the opaque scene transparent"});
                     }
                 if (brightest - darkest < 100)
                     return std::unexpected(common::Error{"Rendered scene is blank"});
@@ -103,10 +127,10 @@ common::Result<void> exercise_renderer() {
         // excluded. Equal timestamps must reproduce an image; advancing time must
         // change it. Long timestamps also exercise the scenery's wrapping logic.
         for (bool maximum : {false, true}) {
-            auto capture = [&](float time) -> common::Result<void> {
-                if (auto rendered = native_buttons::render_scene(
+            auto capture = [&](double time, float zoom = 1) -> common::Result<void> {
+                if (auto rendered = require_frame(native_buttons::render_scene(
                         **scene, time, .34f, maximum, 7, 0, 60, false,
-                        {0, 0, float(width), float(height)}, true, false);
+                        {0, 0, float(width), float(height)}, true, false, 1, zoom));
                     !rendered)
                     return rendered;
                 return gpu::read_pixels(**renderer, pixels);
@@ -118,6 +142,16 @@ common::Result<void> exercise_renderer() {
                 return result;
             if (pixels != reference)
                 return std::unexpected(common::Error{"Frozen scene changed without input"});
+            for (float zoom : {native_buttons::kMinimumZoom, native_buttons::kMaximumZoom}) {
+                if (auto result = capture(120.f, zoom); !result)
+                    return result;
+                size_t changed = 0;
+                for (size_t byte = 0; byte < pixels.size(); ++byte)
+                    changed += pixels[byte] != reference[byte];
+                if (changed < pixels.size() / 1000)
+                    return std::unexpected(
+                        common::Error{"Pinch zoom did not change the rendered camera"});
+            }
             if (auto result = capture(120.5f); !result)
                 return result;
             size_t changed = 0;
@@ -125,6 +159,51 @@ common::Result<void> exercise_renderer() {
                 changed += pixels[byte] != reference[byte];
             if (changed < pixels.size() / 1000)
                 return std::unexpected(common::Error{"Fixed-quality scene animation is frozen"});
+
+            for (double time : {524288., 31536000.}) {
+                if (auto result = capture(time); !result)
+                    return result;
+                reference = pixels;
+                if (auto result = capture(time + 1. / 60); !result)
+                    return result;
+                if (pixels == reference)
+                    return std::unexpected(common::Error{"Long-running scene stopped animating"});
+            }
+        }
+
+        // Fix the camera and geometry so only shader-driven water and particles
+        // can change. This catches narrowing the clock again at the GPU boundary.
+        auto capture_shader_motion = [&](double time) -> common::Result<void> {
+            if (auto prepared = require_frame(gpu::prepare_frame(**renderer, false)); !prepared)
+                return prepared;
+            gpu::clear_instances(**renderer);
+            gpu::add(**renderer, gpu::Shape::kPlane, gpu::scale({20, 1, 20}), {.02f, .2f, .24f},
+                     .2f, .4f, 0, 1);
+            if (auto rendered =
+                    require_frame(gpu::render(**renderer, {0, 6, 8}, {0, 0, 0}, time, false));
+                !rendered)
+                return rendered;
+            if (auto presented = require_frame(gpu::present(**renderer)); !presented)
+                return presented;
+            return gpu::read_pixels(**renderer, pixels);
+        };
+        for (double time : {524288., 31536000., 200 * std::numbers::pi * 1000 - 1. / 120}) {
+            if (auto result = capture_shader_motion(time); !result)
+                return result;
+            auto reference = pixels;
+            if (auto result = capture_shader_motion(time); !result)
+                return result;
+            if (pixels != reference)
+                return std::unexpected(common::Error{"Frozen shader animation changed"});
+            if (auto result = capture_shader_motion(time + 1. / 60); !result)
+                return result;
+            size_t changed = 0, difference = 0;
+            for (size_t byte = 0; byte < pixels.size(); ++byte) {
+                changed += pixels[byte] != reference[byte];
+                difference += std::abs(int(pixels[byte]) - int(reference[byte]));
+            }
+            if (changed < pixels.size() / 1000 || difference > pixels.size() * 3)
+                return std::unexpected(common::Error{"Long-running shader motion froze or jumped"});
         }
     }
     std::puts(
@@ -151,9 +230,9 @@ common::Result<void> export_video() {
     float fps = 0;
     for (int i = 0; i < kFrameCount; ++i) {
         auto begin = std::chrono::steady_clock::now();
-        auto result =
-            native_buttons::render_scene(**scene, 2.f + float(i) / kFrameRate, .34f, false, 0, 0,
-                                         fps, false, {0, 45.f, float(kWidth), kHeight - 85.f});
+        auto result = require_frame(native_buttons::render_scene(
+            **scene, 2.f + float(i) / kFrameRate, .34f, false, 0, 0, fps, false,
+            {0, 48.f, float(kWidth), kHeight - 96.f}, true, true, 2));
         if (!result)
             return std::unexpected(result.error());
         if (auto waited = gpu::wait_frame(**renderer); !waited)
@@ -178,11 +257,18 @@ common::Result<void> run_probe(int argc, char** argv) {
     int width = argc > 2 ? std::atoi(argv[2]) : 1080;
     int height = argc > 3 ? std::atoi(argv[3]) : 2400;
     bool maximum = argc > 4 && std::atoi(argv[4]) != 0;
-    float start_time = argc > 5 ? std::strtof(argv[5], nullptr) : 2.f;
+    double start_time = argc > 5 ? std::strtod(argv[5], nullptr) : 2.;
+    float density = argc > 6 ? std::strtof(argv[6], nullptr) : std::min(width, height) / 360.f;
+    float zoom = argc > 7 ? std::strtof(argv[7], nullptr) : 1;
     if (width < 1 || height < 1 || width > 4096 || height > 4096)
         return std::unexpected(common::Error{"Invalid image dimensions"});
     if (!std::isfinite(start_time) || start_time < 0)
         return std::unexpected(common::Error{"Invalid animation start time"});
+    if (!std::isfinite(density) || density <= 0 || height <= 48 * density)
+        return std::unexpected(common::Error{"Invalid display density"});
+    if (!std::isfinite(zoom) || zoom < native_buttons::kMinimumZoom ||
+        zoom > native_buttons::kMaximumZoom)
+        return std::unexpected(common::Error{"Invalid camera zoom"});
     auto renderer =
         gpu::create_renderer(nullptr, native_buttons::get_scene_shaders(), width, height);
     if (!renderer)
@@ -195,9 +281,10 @@ common::Result<void> run_probe(int argc, char** argv) {
     auto begin = std::chrono::steady_clock::now(), previous = begin;
     float fps = 0;
     for (int i = 0; i < 90; ++i) {
-        float time = start_time + i / 60.f;
-        auto result = native_buttons::render_scene(**scene, time, .34f, maximum, 7, 0, fps, false,
-                                                   {0, 45.f, float(width), height - 85.f});
+        double time = start_time + i / 60.;
+        auto result = require_frame(native_buttons::render_scene(
+            **scene, time, .34f, maximum, 7, 0, fps, false,
+            {0, 24 * density, float(width), height - 48 * density}, true, true, density, zoom));
         if (!result)
             return std::unexpected(result.error());
         if (auto waited = gpu::wait_frame(**renderer); !waited)

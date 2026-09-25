@@ -42,10 +42,12 @@ cc_library(
     name = "runtime",
     srcs = [
         "runtime.cc",
+        "state.cc",
         "storage.cc",
     ],
     hdrs = [
         "runtime.h",
+        "state.h",
         "storage.h",
     ],
     copts = ANDROID_COPTS,
@@ -58,6 +60,18 @@ cc_library(
 )
 
 cc_library(
+    name = "gestures",
+    srcs = ["gestures.cc"],
+    hdrs = ["gestures.h"],
+    copts = ANDROID_COPTS,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [
+        ":runtime",
+        "//common:support",
+    ],
+)
+
+cc_library(
     name = "native_buttons_lib",
     srcs = ["main.cc"],
     copts = ANDROID_COPTS,
@@ -65,6 +79,7 @@ cc_library(
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
+        ":gestures",
         ":runtime",
         ":scene",
         "//common:support",
@@ -129,6 +144,47 @@ cc_test(
 )
 
 cc_test(
+    name = "gestures_test",
+    size = "small",
+    srcs = ["gestures_test.cc"],
+    copts = ANDROID_COPTS,
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [
+        ":gestures",
+        ":runtime",
+        "//common:support",
+    ],
+)
+
+cc_test(
+    name = "state_test",
+    size = "small",
+    srcs = ["state_test.cc"],
+    copts = ANDROID_COPTS,
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [":runtime"],
+)
+
+cc_test(
+    name = "runtime_fault_test",
+    size = "medium",
+    srcs = ["runtime_fault_test.cc"],
+    copts = ANDROID_COPTS,
+    linkopts = ["-Wl,--wrap=AChoreographer_postFrameCallback"],
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [
+        ":gestures",
+        ":runtime",
+        ":scene",
+        "//common:support",
+        "//common/gpu",
+    ],
+)
+
+cc_test(
     name = "depth_fallback_test",
     size = "medium",
     srcs = ["gpu_probe.cc"],
@@ -156,6 +212,43 @@ cc_test(
         "//tools:vulkan_validation": ["-DNATIVE_BUTTONS_VULKAN_VALIDATION"],
         "//conditions:default": [],
     }),
+    linkstatic = True,
+    target_compatible_with = ["@platforms//os:android"],
+    deps = [
+        ":scene",
+        "//common:support",
+        "//common/gpu",
+    ],
+)
+
+cc_test(
+    name = "presentation_test",
+    size = "medium",
+    srcs = ["presentation_test.cc"],
+    copts = ANDROID_COPTS + select({
+        "//tools:vulkan_validation": ["-DNATIVE_BUTTONS_VULKAN_VALIDATION"],
+        "//conditions:default": [],
+    }),
+    linkopts = [
+        "-Wl,--wrap=ANativeWindow_getWidth",
+        "-Wl,--wrap=ANativeWindow_getHeight",
+        "-Wl,--wrap=vkEnumerateInstanceExtensionProperties",
+        "-Wl,--wrap=vkCreateAndroidSurfaceKHR",
+        "-Wl,--wrap=vkDestroySurfaceKHR",
+        "-Wl,--wrap=vkGetPhysicalDeviceSurfaceSupportKHR",
+        "-Wl,--wrap=vkGetPhysicalDeviceSurfaceFormatsKHR",
+        "-Wl,--wrap=vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+        "-Wl,--wrap=vkCreateSwapchainKHR",
+        "-Wl,--wrap=vkDestroySwapchainKHR",
+        "-Wl,--wrap=vkGetSwapchainImagesKHR",
+        "-Wl,--wrap=vkAcquireNextImageKHR",
+        "-Wl,--wrap=vkQueuePresentKHR",
+        "-Wl,--wrap=vkWaitForFences",
+        "-Wl,--wrap=vkDestroySemaphore",
+        "-Wl,--wrap=vkDestroyFence",
+        "-Wl,--wrap=vkDeviceWaitIdle",
+        "-Wl,--wrap=vkCreateRenderPass",
+    ],
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [

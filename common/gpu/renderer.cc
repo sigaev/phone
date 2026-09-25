@@ -119,7 +119,7 @@ struct Glyph {
 };
 struct Globals {
     Mat4 view, light;
-    Color eye_time, size;
+    Color eye_time, size, animation_clock;
 };
 enum class Set : unsigned { kScene, kHdr, kBloom0, kBloom1, kPost, kUi, kCount };
 struct Frame {
@@ -127,14 +127,17 @@ struct Frame {
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     VkSemaphore acquired = VK_NULL_HANDLE;
+    VkFence acquisition = VK_NULL_HANDLE;
     Owner<Buffer> globals, instances, ui;
     VkDescriptorSet sets[static_cast<unsigned>(Set::kCount)]{};
-    bool submitted = false;
+    bool submitted = false, in_flight = false, acquiring = false;
 };
 struct SurfaceImage {
     VkImageView view = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkSemaphore ready = VK_NULL_HANDLE;
+    VkFence presented = VK_NULL_HANDLE;
+    bool present_pending = false;
 };
 }  // namespace
 
@@ -154,6 +157,7 @@ struct Renderer {
     ANativeWindow* window = nullptr;
     VkFormat output_format = VK_FORMAT_R8G8B8A8_UNORM, depth_format = VK_FORMAT_D24_UNORM_S8_UINT;
     VkColorSpaceKHR color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    VkSurfaceTransformFlagBitsKHR surface_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
@@ -175,7 +179,7 @@ struct Renderer {
     unsigned frame_index = 0, image_index = 0, last_frame = 0, triangle_count = 0;
     int width = 0, height = 0, window_width = 0, window_height = 0, render_width = 0,
         render_height = 0, shadow_size = 0, particle_count = 0;
-    bool maximum = false, recreate_surface = false, has_frame = false;
+    bool maximum = false, recreate_surface = false, targets_ready = false, has_frame = false;
     float gpu_millis = 0;
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_4_BIT;
     std::vector<Mesh> meshes;
@@ -293,6 +297,30 @@ Result<void> begin_commands(Renderer& r, Frame& frame) {
     VK_CHECK(vkBeginCommandBuffer(frame.command, &begin));
     return {};
 }
+// Every queue submission and acquisition has a fence. Present fences cover the
+// presentation engine too; device/queue idle alone cannot release its resources.
+VkResult wait_for_work(Renderer& r) {
+    std::vector<VkFence> fences;
+    for (auto& frame : r.frames) {
+        if (frame.in_flight)
+            fences.push_back(frame.fence);
+        if (frame.acquiring)
+            fences.push_back(frame.acquisition);
+    }
+    for (auto& image : r.surface_images)
+        if (image.present_pending)
+            fences.push_back(image.presented);
+    VkResult result = fences.empty() ? VK_SUCCESS
+                                     : vkWaitForFences(r.device, fences.size(), fences.data(),
+                                                       VK_TRUE, kFrameTimeout);
+    if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST) {
+        for (auto& frame : r.frames)
+            frame.in_flight = frame.acquiring = false;
+        for (auto& image : r.surface_images)
+            image.present_pending = false;
+    }
+    return result;
+}
 Result<void> submit_immediate(Renderer& r, Frame& frame) {
     VK_CHECK(vkEndCommandBuffer(frame.command));
     VK_CHECK(vkResetFences(r.device, 1, &frame.fence));
@@ -300,7 +328,17 @@ Result<void> submit_immediate(Renderer& r, Frame& frame) {
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &frame.command;
     VK_CHECK(vkQueueSubmit(r.queue, 1, &submit, frame.fence));
-    VK_CHECK(vkWaitForFences(r.device, 1, &frame.fence, VK_TRUE, kWaitForever));
+    frame.in_flight = true;
+    auto result = vkWaitForFences(r.device, 1, &frame.fence, VK_TRUE, kFrameTimeout);
+    if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
+        // Callers own temporary staging buffers. They cannot unwind into cleanup
+        // while this submission still uses those buffers.
+        (void)fail("GPU transfer did not finish before its deadline", result);
+        std::abort();
+    }
+    frame.in_flight = false;
+    if (result != VK_SUCCESS)
+        return fail("GPU transfer failed", result);
     return {};
 }
 void image_barrier(VkCommandBuffer command, VkImage image, VkImageLayout old_layout,
@@ -318,26 +356,33 @@ void image_barrier(VkCommandBuffer command, VkImage image, VkImageLayout old_lay
                          &barrier);
 }
 Result<void> create_context(Renderer& r) {
-    const char* instance_extensions[] = {VK_KHR_SURFACE_EXTENSION_NAME,
-                                         VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
+    std::vector<const char*> instance_extensions;
+    if (r.window) {
+        unsigned count = 0;
+        VK_CHECK(vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr));
+        std::vector<VkExtensionProperties> available(count);
+        VK_CHECK(vkEnumerateInstanceExtensionProperties(nullptr, &count, available.data()));
+        for (const char* name :
+             {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
+              VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
+              VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME}) {
+            if (std::none_of(available.begin(), available.end(), [&](const auto& extension) {
+                    return std::strcmp(extension.extensionName, name) == 0;
+                }))
+                return fail("Safe window rendering requires Vulkan surface maintenance support");
+            instance_extensions.push_back(name);
+        }
+    }
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "native_buttons";
     app.apiVersion = VK_API_VERSION_1_1;
     VkInstanceCreateInfo instance{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     instance.pApplicationInfo = &app;
-    if (r.window) {
-        instance.enabledExtensionCount = 2;
-        instance.ppEnabledExtensionNames = instance_extensions;
-    }
 #if defined(NATIVE_BUTTONS_VULKAN_VALIDATION)
     const char* layer = "VK_LAYER_KHRONOS_validation";
-    const char* validation_extensions[] = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
-                                           VK_KHR_SURFACE_EXTENSION_NAME,
-                                           VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
+    instance_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     instance.enabledLayerCount = 1;
     instance.ppEnabledLayerNames = &layer;
-    instance.enabledExtensionCount = r.window ? 3 : 1;
-    instance.ppEnabledExtensionNames = validation_extensions;
     VkDebugUtilsMessengerCreateInfoEXT debug{
         VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
     debug.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
@@ -354,6 +399,8 @@ Result<void> create_context(Renderer& r) {
     debug.pNext = &validation;
     instance.pNext = &debug;
 #endif
+    instance.enabledExtensionCount = instance_extensions.size();
+    instance.ppEnabledExtensionNames = instance_extensions.data();
     VK_CHECK(vkCreateInstance(&instance, nullptr, &r.instance));
 #if defined(NATIVE_BUTTONS_VULKAN_VALIDATION)
     debug.pNext = nullptr;
@@ -453,14 +500,36 @@ Result<void> create_context(Renderer& r) {
     queue.pQueuePriorities = &priority;
     VkPhysicalDeviceFeatures enabled{};
     enabled.largePoints = VK_TRUE;
-    const char* extension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME};
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT};
     VkDeviceCreateInfo device{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device.queueCreateInfoCount = 1;
     device.pQueueCreateInfos = &queue;
     device.pEnabledFeatures = &enabled;
     if (r.surface) {
-        device.enabledExtensionCount = 1;
-        device.ppEnabledExtensionNames = &extension;
+        VK_CHECK(vkEnumerateDeviceExtensionProperties(r.physical, nullptr, &count, nullptr));
+        std::vector<VkExtensionProperties> available(count);
+        VK_CHECK(
+            vkEnumerateDeviceExtensionProperties(r.physical, nullptr, &count, available.data()));
+        for (const char* name : extensions)
+            if (std::none_of(available.begin(), available.end(), [&](const auto& extension) {
+                    return std::strcmp(extension.extensionName, name) == 0;
+                }))
+                return fail("Safe window rendering requires Vulkan swapchain presentation fences");
+        VkPhysicalDeviceFeatures2 supported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        supported.pNext = &maintenance;
+        auto get_features = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+            vkGetInstanceProcAddr(r.instance, "vkGetPhysicalDeviceFeatures2"));
+        if (!get_features)
+            return fail("Vulkan 1.1 feature queries are unavailable");
+        get_features(r.physical, &supported);
+        if (!maintenance.swapchainMaintenance1)
+            return fail("The Vulkan driver does not support swapchain presentation fences");
+        device.pNext = &maintenance;
+        device.enabledExtensionCount = std::size(extensions);
+        device.ppEnabledExtensionNames = extensions;
     }
     VK_CHECK(vkCreateDevice(r.physical, &device, nullptr, &r.device));
     vkGetDeviceQueue(r.device, r.queue_family, 0, &r.queue);
@@ -494,6 +563,8 @@ Result<void> create_context(Renderer& r) {
         VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fence.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         VK_CHECK(vkCreateFence(r.device, &fence, nullptr, &frame.fence));
+        fence.flags = 0;
+        VK_CHECK(vkCreateFence(r.device, &fence, nullptr, &frame.acquisition));
         VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VK_CHECK(vkCreateSemaphore(r.device, &semaphore, nullptr, &frame.acquired));
         if (auto result = reserve_buffer(r, frame.globals, sizeof(Globals),
@@ -731,7 +802,9 @@ Result<VkPipeline> create_pipeline(Renderer& r, std::span<const std::uint32_t> v
     blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     blend.blendEnable = ui || particle;
-    blend.srcColorBlendFactor = blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    // Source-over UI coverage preserves opaque alpha in the final image.
+    blend.srcAlphaBlendFactor = ui ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA;
     blend.dstColorBlendFactor = blend.dstAlphaBlendFactor =
         particle ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     blend.colorBlendOp = blend.alphaBlendOp = VK_BLEND_OP_ADD;
@@ -819,6 +892,8 @@ Result<void> create_pipelines(Renderer& r, SceneShaders shaders) {
 }
 
 void destroy_targets(Renderer& r) {
+    r.targets_ready = false;
+    r.has_frame = false;
     vkDestroyFramebuffer(r.device, r.hdr_framebuffer, nullptr);
     vkDestroyFramebuffer(r.device, r.shadow_framebuffer, nullptr);
     vkDestroyFramebuffer(r.device, r.output_framebuffer, nullptr);
@@ -831,6 +906,7 @@ void destroy_targets(Renderer& r) {
         vkDestroyFramebuffer(r.device, image.framebuffer, nullptr);
         vkDestroyImageView(r.device, image.view, nullptr);
         vkDestroySemaphore(r.device, image.ready, nullptr);
+        vkDestroyFence(r.device, image.presented, nullptr);
     }
     r.surface_images.clear();
     r.hdr.reset();
@@ -855,18 +931,20 @@ Result<VkFramebuffer> create_framebuffer(Renderer& r, VkRenderPass pass,
     VK_CHECK(vkCreateFramebuffer(r.device, &info, nullptr, &framebuffer));
     return framebuffer;
 }
-Result<void> create_swapchain(Renderer& r) {
-    VkSurfaceCapabilitiesKHR capabilities;
-    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r.physical, r.surface, &capabilities));
-    if (capabilities.currentExtent.width != std::numeric_limits<unsigned>::max()) {
-        r.width = capabilities.currentExtent.width;
-        r.height = capabilities.currentExtent.height;
-    } else {
-        r.width = std::clamp<unsigned>(r.width, capabilities.minImageExtent.width,
-                                       capabilities.maxImageExtent.width);
-        r.height = std::clamp<unsigned>(r.height, capabilities.minImageExtent.height,
-                                        capabilities.maxImageExtent.height);
-    }
+VkExtent2D surface_extent(const Renderer& r, const VkSurfaceCapabilitiesKHR& capabilities) {
+    if (capabilities.currentExtent.width != std::numeric_limits<unsigned>::max())
+        return capabilities.currentExtent;
+    int width = ANativeWindow_getWidth(r.window), height = ANativeWindow_getHeight(r.window);
+    if (width <= 0 || height <= 0)
+        return {};
+    return {std::clamp<unsigned>(width, capabilities.minImageExtent.width,
+                                 capabilities.maxImageExtent.width),
+            std::clamp<unsigned>(height, capabilities.minImageExtent.height,
+                                 capabilities.maxImageExtent.height)};
+}
+Result<bool> create_swapchain(Renderer& r, const VkSurfaceCapabilitiesKHR& capabilities) {
+    if (r.width <= 0 || r.height <= 0)
+        return false;
     if (!(capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
         return fail("Vulkan surface cannot be rendered to");
     unsigned count = capabilities.minImageCount + 1;
@@ -896,10 +974,16 @@ Result<void> create_swapchain(Renderer& r) {
     info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     info.clipped = VK_TRUE;
     info.oldSwapchain = r.swapchain;
-    VkSwapchainKHR swapchain;
-    VK_CHECK(vkCreateSwapchainKHR(r.device, &info, nullptr, &swapchain));
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    auto result = vkCreateSwapchainKHR(r.device, &info, nullptr, &swapchain);
+    // Passing oldSwapchain retires it even when creation fails. Never retry
+    // with that retired handle, and keep partially built targets unready.
     vkDestroySwapchainKHR(r.device, r.swapchain, nullptr);
-    r.swapchain = swapchain;
+    r.swapchain = result == VK_SUCCESS ? swapchain : VK_NULL_HANDLE;
+    if (result == VK_ERROR_OUT_OF_DATE_KHR)
+        return false;
+    if (result != VK_SUCCESS)
+        return fail("Cannot create the Vulkan swapchain", result);
     VK_CHECK(vkGetSwapchainImagesKHR(r.device, r.swapchain, &count, nullptr));
     std::vector<VkImage> images(count);
     VK_CHECK(vkGetSwapchainImagesKHR(r.device, r.swapchain, &count, images.data()));
@@ -919,8 +1003,10 @@ Result<void> create_swapchain(Renderer& r) {
         image.framebuffer = *framebuffer;
         VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VK_CHECK(vkCreateSemaphore(r.device, &semaphore, nullptr, &image.ready));
+        VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VK_CHECK(vkCreateFence(r.device, &fence, nullptr, &image.presented));
     }
-    return {};
+    return true;
 }
 void update_descriptors(Renderer& r) {
     for (auto& frame : r.frames)
@@ -957,24 +1043,39 @@ void update_descriptors(Renderer& r) {
             vkUpdateDescriptorSets(r.device, 4, writes, 0, nullptr);
         }
 }
-Result<void> ensure_targets(Renderer& r, bool maximum) {
-    int width = r.window ? ANativeWindow_getWidth(r.window) : r.width;
-    int height = r.window ? ANativeWindow_getHeight(r.window) : r.height;
-    if (width <= 0 || height <= 0)
+Result<bool> ensure_targets(Renderer& r, bool maximum) {
+    int width = r.width, height = r.height;
+    VkSurfaceCapabilitiesKHR capabilities{};
+    if (r.window) {
+        // Android's ordinary window dimensions can report the buffer size set
+        // by our old swapchain. Surface capabilities query the consumer's current
+        // window extent instead, including rotation and multi-window resizing.
+        VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r.physical, r.surface, &capabilities));
+        auto extent = surface_extent(r, capabilities);
+        width = extent.width;
+        height = extent.height;
+    }
+    if (width <= 0 || height <= 0) {
+        if (r.window) {
+            r.recreate_surface = true;
+            return false;
+        }
         return fail("Vulkan surface has no size");
-    if (r.hdr && r.maximum == maximum && !r.recreate_surface && width == r.window_width &&
-        height == r.window_height)
-        return {};
-    VK_CHECK(vkDeviceWaitIdle(r.device));
+    }
+    if (r.targets_ready && r.maximum == maximum && !r.recreate_surface && width == r.window_width &&
+        height == r.window_height &&
+        (!r.window || r.surface_transform == capabilities.currentTransform))
+        return true;
+    VK_CHECK(wait_for_work(r));
     destroy_targets(r);
     r.width = r.window_width = width;
     r.height = r.window_height = height;
     r.maximum = maximum;
     if (r.window) {
-        if (auto result = create_swapchain(r); !result)
+        r.surface_transform = capabilities.currentTransform;
+        if (auto result = create_swapchain(r, capabilities); !result || !*result)
             return result;
     }
-    r.recreate_surface = false;
     float scale = maximum ? 1.30f : 1.f;
     r.render_width = int(r.width * scale);
     r.render_height = int(r.height * scale);
@@ -1048,7 +1149,9 @@ Result<void> ensure_targets(Renderer& r, bool maximum) {
         r.output_framebuffer = *framebuffer;
     }
     update_descriptors(r);
-    return {};
+    r.targets_ready = true;
+    r.recreate_surface = false;
+    return true;
 }
 
 Result<void> create_font(Renderer& renderer) {
@@ -1338,35 +1441,64 @@ Result<MeshId> create_mesh(Renderer& r, std::span<const Vertex> vertices,
     r.meshes.back().items.reserve(1024);
     return static_cast<MeshId>(r.meshes.size() - 1);
 }
-Result<void> prepare_frame(Renderer& r, bool maximum) {
+Result<bool> prepare_frame(Renderer& r, bool maximum) {
     return ensure_targets(r, maximum);
 }
-Result<void> render(Renderer& r, Vec3 eye, Vec3 target, float time, bool maximum) {
-    if (auto result = ensure_targets(r, maximum); !result)
-        return result;
+Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximum) {
+    // Camera and UI coordinates refer to the targets prepared by the caller.
+    // Never rebuild them here after that layout has been computed.
+    if (!r.targets_ready || r.maximum != maximum || r.recreate_surface)
+        return false;
+    if (r.window) {
+        VkSurfaceCapabilitiesKHR capabilities;
+        VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r.physical, r.surface, &capabilities));
+        auto extent = surface_extent(r, capabilities);
+        if (int(extent.width) != r.window_width || int(extent.height) != r.window_height ||
+            capabilities.currentTransform != r.surface_transform) {
+            r.recreate_surface = true;
+            return false;
+        }
+    }
     auto& frame = r.frames[r.frame_index];
     VK_CHECK(vkWaitForFences(r.device, 1, &frame.fence, VK_TRUE, kFrameTimeout));
+    frame.in_flight = false;
     collect_timing(r, r.frame_index);
     if (r.window) {
+        if (frame.acquiring) {
+            VK_CHECK(vkWaitForFences(r.device, 1, &frame.acquisition, VK_TRUE, kFrameTimeout));
+            frame.acquiring = false;
+        }
+        VK_CHECK(vkResetFences(r.device, 1, &frame.acquisition));
         auto acquired = vkAcquireNextImageKHR(r.device, r.swapchain, kFrameTimeout, frame.acquired,
-                                              VK_NULL_HANDLE, &r.image_index);
+                                              frame.acquisition, &r.image_index);
         if (acquired == VK_ERROR_OUT_OF_DATE_KHR) {
             r.recreate_surface = true;
-            if (auto result = ensure_targets(r, maximum); !result)
-                return result;
-            acquired = vkAcquireNextImageKHR(r.device, r.swapchain, kFrameTimeout, frame.acquired,
-                                             VK_NULL_HANDLE, &r.image_index);
+            // Rebuild before the next frame's camera and UI layout are computed.
+            return false;
         }
+        if (acquired == VK_TIMEOUT || acquired == VK_NOT_READY)
+            return false;
         if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR)
             return fail("Cannot acquire a Vulkan surface image", acquired);
+        frame.acquiring = true;
+        auto& image = r.surface_images[r.image_index];
+        if (image.present_pending) {
+            VK_CHECK(vkWaitForFences(r.device, 1, &image.presented, VK_TRUE, kFrameTimeout));
+            image.present_pending = false;
+            VK_CHECK(vkResetFences(r.device, 1, &image.presented));
+        }
         // With compositor rotation, SUBOPTIMAL alone need not mean the window
         // dimensions changed. Recreating on every such frame would churn targets.
     }
+    // Periodic shader motion gets bounded clocks. Seed-dependent particle
+    // velocities use both halves of the elapsed time, reduced in the shader.
+    float time_high = static_cast<float>(time);
     Globals globals{
         perspective(42 * kPi / 180, float(r.width) / r.height, .15f, 80) * look_at(eye, target),
         ortho(-8, 8, -8, 8, .1f, 32) * look_at({-8, 13, 8}, {0, 0, 0}),
-        {eye.x, eye.y, eye.z, time},
+        {eye.x, eye.y, eye.z, oscillation_time(time)},
         {r.render_height / 1000.f, 1.f / r.shadow_size, float(r.width), float(r.height)},
+        {time_high, static_cast<float>(time - time_high), static_cast<float>(wrap(time, 100.)), 0},
     };
     std::memcpy(frame.globals->mapped, &globals, sizeof(globals));
     VkDeviceSize size = 0;
@@ -1376,13 +1508,13 @@ Result<void> render(Renderer& r, Vec3 eye, Vec3 target, float time, bool maximum
     }
     if (auto result = reserve_buffer(r, frame.instances, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         !result)
-        return result;
+        return std::unexpected(result.error());
     for (auto& mesh : r.meshes)
         if (!mesh.items.empty())
             std::memcpy(static_cast<char*>(frame.instances->mapped) + mesh.instance_offset,
                         mesh.items.data(), mesh.items.size() * sizeof(Instance));
     if (auto result = begin_commands(r, frame); !result)
-        return result;
+        return std::unexpected(result.error());
     auto command = frame.command;
     if (r.queries) {
         vkCmdResetQueryPool(command, r.queries, r.frame_index * 2, 2);
@@ -1429,14 +1561,14 @@ Result<void> render(Renderer& r, Vec3 eye, Vec3 target, float time, bool maximum
     bind(r, r.post_pipeline, Set::kPost);
     vkCmdDraw(command, 3, 1, 0, 0);
     // UI is appended to this render pass by present(), without another image store/load.
-    return {};
+    return true;
 }
-Result<void> present(Renderer& r) {
+Result<bool> present(Renderer& r) {
     auto& frame = r.frames[r.frame_index];
     if (auto result = reserve_buffer(r, frame.ui, r.ui.size() * sizeof(UiVertex),
                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         !result)
-        return result;
+        return std::unexpected(result.error());
     if (!r.ui.empty()) {
         std::memcpy(frame.ui->mapped, r.ui.data(), r.ui.size() * sizeof(UiVertex));
         bind(r, r.ui_pipeline, Set::kUi);
@@ -1461,24 +1593,36 @@ Result<void> present(Renderer& r) {
         submit.pSignalSemaphores = &r.surface_images[r.image_index].ready;
     }
     VK_CHECK(vkQueueSubmit(r.queue, 1, &submit, frame.fence));
+    frame.in_flight = true;
     frame.submitted = true;
     r.last_frame = r.frame_index;
     r.has_frame = true;
     r.frame_index = (r.frame_index + 1) % kFrameCount;
     if (r.window) {
+        auto& image = r.surface_images[r.image_index];
+        VkSwapchainPresentFenceInfoEXT completion{
+            VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT};
+        completion.swapchainCount = 1;
+        completion.pFences = &image.presented;
         VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        present.pNext = &completion;
         present.waitSemaphoreCount = 1;
         present.pWaitSemaphores = &r.surface_images[r.image_index].ready;
         present.swapchainCount = 1;
         present.pSwapchains = &r.swapchain;
         present.pImageIndices = &r.image_index;
         auto result = vkQueuePresentKHR(r.queue, &present);
-        if (result == VK_ERROR_OUT_OF_DATE_KHR)
+        // OUT_OF_DATE and SURFACE_LOST still enqueue the presentation operations.
+        // Allocation failures leave the fence untouched and must not be waited on.
+        image.present_pending =
+            result != VK_ERROR_OUT_OF_HOST_MEMORY && result != VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             r.recreate_surface = true;
-        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+            return false;
+        } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
             return fail("Cannot present the Vulkan frame", result);
     }
-    return {};
+    return true;
 }
 Result<void> wait_frame(Renderer& r) {
     if (!r.has_frame)
@@ -1497,7 +1641,8 @@ Result<void> read_pixels(Renderer& r, std::span<unsigned char> rgba) {
     if (!staging)
         return std::unexpected(staging.error());
     auto& frame = r.frames[r.frame_index];
-    VK_CHECK(vkWaitForFences(r.device, 1, &frame.fence, VK_TRUE, kWaitForever));
+    VK_CHECK(vkWaitForFences(r.device, 1, &frame.fence, VK_TRUE, kFrameTimeout));
+    frame.in_flight = false;
     collect_timing(r, r.frame_index);
     if (auto result = begin_commands(r, frame); !result)
         return result;
@@ -1563,7 +1708,11 @@ void destroy(Renderer* renderer) noexcept {
         return;
     auto& r = *renderer;
     if (r.device) {
-        vkDeviceWaitIdle(r.device);
+        auto result = wait_for_work(r);
+        if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
+            (void)fail("Cannot safely release GPU resources before their deadline", result);
+            std::abort();
+        }
         destroy_targets(r);
         r.meshes.clear();
         r.font.reset();
@@ -1574,6 +1723,7 @@ void destroy(Renderer* renderer) noexcept {
             frame.ui.reset();
             vkDestroySemaphore(r.device, frame.acquired, nullptr);
             vkDestroyFence(r.device, frame.fence, nullptr);
+            vkDestroyFence(r.device, frame.acquisition, nullptr);
             vkDestroyCommandPool(r.device, frame.pool, nullptr);
         }
         vkDestroyQueryPool(r.device, r.queries, nullptr);

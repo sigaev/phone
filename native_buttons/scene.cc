@@ -143,7 +143,7 @@ void bicycle(Renderer& r, float time) {
         prev = next;
     }
 }
-void pelican(Scene& scene, float time) {
+void pelican(Scene& scene, float time, float blink_phase) {
     Renderer& r = *scene.renderer;
     float bob = std::sin(time * 6.2f) * .025f;
     float breath = 1.f + .012f * std::sin(time * 2.2f);
@@ -183,7 +183,6 @@ void pelican(Scene& scene, float time) {
     ball(r, {1.14f, 3.062f + bob, 0}, {.62f, .049f, .16f}, kOrange, -.052f, .36f);
     ball(r, {1.69f, 3.015f + bob, 0}, {.10f, .047f, .049f}, {.86f, .28f, .045f}, -.18f);
     tube(r, {.71f, 3.03f + bob, .147f}, {1.63f, 3.015f + bob, .044f}, .006f, {.57f, .23f, .02f});
-    float blink_phase = std::fmod(time + 1.7f, 4.8f);
     float eye_open = std::clamp(std::fabs(blink_phase - .12f) / .10f, .08f, 1.f);
     for (int side : {-1, 1}) {
         ball(r, {.58f, 3.17f + bob, side * .225f}, {.095f, .10f * eye_open, .027f},
@@ -224,8 +223,10 @@ void pelican(Scene& scene, float time) {
 }
 }  // namespace
 
-void build_scene(Scene& scene, float time, bool maximum) {
+void build_scene(Scene& scene, double time, bool maximum) {
     Renderer& r = *scene.renderer;
+    float motion = oscillation_time(time);
+    double travel = wrap(time, 44. / 2.6) * 2.6;
     clear_instances(r);
     add(r, Shape::kPlane, transform({0, -.15f, 0}, {55, 1, 55}), {.02f, .2f, .24f}, .2f, .4f, 0, 1);
     add(r, Shape::kPlane, transform({0, -.018f, 0}, {22, 1, 1.16f}), {.27f, .32f, .32f}, .88f);
@@ -234,7 +235,7 @@ void build_scene(Scene& scene, float time, bool maximum) {
     for (int side : {-1, 1}) {
         tube(r, {-22, -.01f, side * 1.16f}, {22, -.01f, side * 1.16f}, .035f, {.63f, .66f, .58f});
         for (int i = 0; i < 12; ++i) {
-            float x = wrap(i * 3.7f - time * 2.6f + 220.f, 44.f) - 22.f;
+            float x = wrap(i * 3.7 - travel + 220., 44.) - 22.;
             ball(r, {x, -.11f, side * 1.35f}, {.35f, .11f, .22f}, {.21f, .27f, .26f}, i * .7f, .9f);
             if (side < 0) {
                 tube(r, {x, .02f, -1.04f}, {x, .42f, -1.04f}, .025f, {.18f, .26f, .28f});
@@ -245,75 +246,104 @@ void build_scene(Scene& scene, float time, bool maximum) {
     }
     int palms = maximum ? 16 : 9;
     for (int i = 0; i < palms; ++i) {
-        float x = wrap(i * 4.7f - time * 2.6f + 200.f, 44.f) - 22.f, z = -3.4f - (i % 3) * 2.3f;
+        float x = wrap(i * 4.7 - travel + 200., 44.) - 22., z = -3.4f - (i % 3) * 2.3f;
         ball(r, {x, -.23f, z}, {1.4f, .31f, 1.2f}, {.37f, .32f, .18f}, 0, .9f);
-        palm(r, x, z, 1.65f + (i % 4) * .24f, time + i);
+        palm(r, x, z, 1.65f + (i % 4) * .24f, motion + i);
     }
     for (int i = 0; i < 7; ++i)
         ball(r, {-20.f + i * 7, -.5f, -24.f - i % 2 * 5}, {5.f, .65f + (i % 3) * .3f, 3.f},
              {.025f, .06f, .065f}, 0, .9f);
     for (int i = 0; i < 6; ++i) {
-        float x = std::sin(time * .12f + i) * 9, z = -11.f - i;
+        float x = std::sin(motion * .12f + i) * 9, z = -11.f - i;
         Vec3 p{x, 4.f + (i % 3) * .4f, z};
         for (int side : {-1, 1})
-            leaf(r, p, p + Vec3{side * .22f, .09f * std::sin(time * 3 + i), 0}, .033f,
+            leaf(r, p, p + Vec3{side * .22f, .09f * std::sin(motion * 3 + i), 0}, .033f,
                  {.64f, .78f, .80f});
     }
-    bicycle(r, time);
-    pelican(scene, time);
+    bicycle(r, motion);
+    pelican(scene, motion, static_cast<float>(wrap(time + 1.7, 4.8)));
 }
 
-Vec3 camera(float time, float yaw, float aspect) {
-    float angle = yaw + time * kOrbitSpeed;
+Vec3 camera(double time, float yaw, float aspect, float zoom) {
+    float angle = yaw + static_cast<float>(wrap(time, 60.)) * kOrbitSpeed;
+    float motion = oscillation_time(time);
     float distance = std::max(7.2f, 5.15f / std::max(aspect, .35f));
-    distance *= 1.f + .025f * std::sin(time * .19f);
-    float elevation = .29f + .045f * std::sin(time * .14f);
+    distance *= (1.f + .025f * std::sin(motion * .19f)) / zoom;
+    float elevation = .29f + .045f * std::sin(motion * .14f);
     return {std::sin(angle) * distance, 1.3f + distance * elevation, std::cos(angle) * distance};
 }
 
 Controls draw_overlay(Renderer& r, Rect safe, int count, int pressed, float fps, bool maximum,
-                      bool paused, bool saved) {
-    float s = std::min(safe.w / 400.f, safe.h / 720.f), cx = safe.x + safe.w * .5f,
-          top = safe.y + 22 * s, bottom = safe.y + safe.h;
-    Color text{.92f, .96f, .97f}, muted{.58f, .72f, .77f}, mint{.49f, .94f, .76f};
-    draw_rect(r, {cx - 170 * s, top, 91 * s, 23 * s}, 11 * s, {.08f, .22f, .23f, .93f});
-    draw_text(r, "LIVE / 3D", cx - 124.5f * s, top + 16 * s, 14 * s, mint, true);
-    draw_text(r, "Coasting.", cx - 170 * s, top + 72 * s, 51 * s, text);
-    draw_text(r, "A pelican. A bicycle. The long way home.", cx - 170 * s, top + 101 * s, 17 * s,
-              muted);
-    char stats[128];
-    std::snprintf(stats, sizeof(stats), "%.0f FPS", fps);
-    draw_text(r, stats, cx + 130 * s, top + 18 * s, 20 * s, text, true);
-    if (get_stats(r).gpu_ms > 0)
-        std::snprintf(stats, sizeof(stats), "GPU %.1f ms", get_stats(r).gpu_ms);
-    else
-        std::snprintf(stats, sizeof(stats), "%s", get_device(r).data());
-    draw_text(r, stats, cx + 123 * s, top + 37 * s, 12 * s, muted, true);
-    Controls controls = layout_controls(safe);
-    draw_rect(r, controls.quality, 16 * s,
-              pressed == 3 ? Color{.18f, .36f, .36f, .95f} : Color{.06f, .16f, .20f, .86f});
-    draw_text(r, maximum ? "ULTRA DETAIL" : "HIGH DETAIL", cx - 113 * s, top + 141 * s, 13 * s,
-              mint, true);
-    draw_rect(r, controls.pause, 16 * s,
-              pressed == 4 ? Color{.18f, .36f, .36f, .95f} : Color{.06f, .16f, .20f, .86f});
-    draw_text(r, paused ? "RESUME" : "PAUSE", cx - 4 * s, top + 141 * s, 13 * s, text, true);
-    draw_text(r, "Auto orbit / drag to look around", cx, bottom - 196 * s, 14 * s, muted, true);
-    Rect panel{cx - 180 * s, bottom - 176 * s, 360 * s, 156 * s};
-    draw_rect(r, panel, 24 * s, {.025f, .075f, .105f, .94f});
-    draw_text(r, "YOUR COUNT", cx - 160 * s, panel.y + 28 * s, 12 * s, muted);
-    char number[24];
-    std::snprintf(number, sizeof(number), "%d", count);
-    draw_text(r, number, cx - 160 * s, panel.y + 70 * s, 43 * s, text);
-    draw_text(r, saved ? "Saved automatically" : "Not saved - try again", cx + 91 * s,
-              panel.y + 36 * s, 13 * s, saved ? muted : Color{1.f, .65f, .4f}, true);
-    std::snprintf(stats, sizeof(stats), "%dx MSAA / %s", get_stats(r).samples,
-                  maximum ? "130%" : "100%");
-    draw_text(r, stats, cx + 91 * s, panel.y + 57 * s, 12 * s, muted, true);
-    draw_rect(r, controls.add, 16 * s, pressed == 1 ? Color{.28f, .70f, .56f} : mint);
-    draw_text(r, "+  Add one", cx - 50 * s, panel.y + 119 * s, 22 * s, {.035f, .15f, .14f}, true);
-    draw_rect(r, controls.reset, 16 * s,
-              pressed == 2 ? Color{.17f, .30f, .35f} : Color{.10f, .20f, .25f});
-    draw_text(r, "Reset", cx + 116 * s, panel.y + 118 * s, 18 * s, text, true);
+                      bool paused, bool saved, float density) {
+    auto layout = layout_overlay(safe, density);
+    float s = layout.density;
+    Rect panel = layout.panel;
+    const auto& controls = layout.controls;
+    bool compact = layout.mode == OverlayMode::kCompact;
+    bool landscape = layout.mode == OverlayMode::kLandscape;
+    Color text{.92f, .96f, .97f}, muted{.74f, .84f, .87f}, mint{.49f, .94f, .76f};
+    char stats[128], number[24];
+    if (landscape) {
+        float left = safe.x + 24 * s;
+        draw_text(r, "Coasting.", left, safe.y + 60 * s, 51 * s, text);
+        std::snprintf(stats, sizeof(stats), "%.0f FPS  /  GPU %.1f ms", fps, get_stats(r).gpu_ms);
+        draw_text(r, stats, left, safe.y + 84 * s, 16 * s, muted);
+    } else if (!compact) {
+        float left = panel.x + 10 * s;
+        float top = safe.y + 22 * s;
+        draw_rect(r, {left, top, 91 * s, 23 * s}, 11 * s, {.08f, .22f, .23f, .48f});
+        draw_text(r, "LIVE / 3D", left + 45.5f * s, top + 16 * s, 14 * s, mint, true);
+        draw_text(r, "Coasting.", left, top + 72 * s, 51 * s, text);
+        if (safe.w >= 340 * s)
+            draw_text(r, "A pelican. A bicycle. The long way home.", left, top + 101 * s, 17 * s,
+                      muted);
+        std::snprintf(stats, sizeof(stats), "%.0f FPS", fps);
+        float stats_x = panel.x + panel.w - 80 * s;
+        float stats_y = top + 18 * s;
+        draw_text(r, stats, stats_x, stats_y, 20 * s, text);
+        if (get_stats(r).gpu_ms > 0)
+            std::snprintf(stats, sizeof(stats), "GPU %.1f ms", get_stats(r).gpu_ms);
+        else
+            std::snprintf(stats, sizeof(stats), "%s", get_device(r).data());
+        draw_text(r, stats, stats_x, stats_y + 19 * s, 12 * s, muted);
+    }
+    draw_rect(r, panel, 20 * s, {.025f, .075f, .105f, .40f});
+    if (compact) {
+        std::snprintf(number, sizeof(number), "Count: %d", count);
+        draw_text(r, number, panel.x + 12 * s, panel.y + 26 * s, 20 * s, text);
+        if (panel.w >= 300 * s)
+            draw_text(r, saved ? "Saved" : "Not saved", panel.x + panel.w - 80 * s,
+                      panel.y + 25 * s, 13 * s, saved ? muted : Color{1.f, .65f, .4f});
+    } else {
+        draw_text(r, "YOUR COUNT", panel.x + 20 * s, panel.y + 28 * s, 12 * s, muted);
+        std::snprintf(number, sizeof(number), "%d", count);
+        draw_text(r, number, panel.x + 20 * s, panel.y + 70 * s, 43 * s, text);
+        float info_x = landscape ? panel.x + 20 * s : panel.x + panel.w * .75f;
+        float info_y = panel.y + (landscape ? 94 : 36) * s;
+        draw_text(r, saved ? "Saved automatically" : "Not saved - try again", info_x, info_y,
+                  13 * s, saved ? muted : Color{1.f, .65f, .4f}, !landscape);
+        std::snprintf(stats, sizeof(stats), "%dx MSAA / %s", get_stats(r).samples,
+                      maximum ? "130%" : "100%");
+        draw_text(r, stats, info_x, info_y + 21 * s, 12 * s, muted, !landscape);
+    }
+    auto button = [&](Rect bounds, Control control, const char* label, float font_size) {
+        bool add = control == Control::kAdd;
+        bool highlighted = pressed == static_cast<int>(control);
+        Color background =
+            add ? (highlighted ? Color{.28f, .70f, .56f, .82f}
+                               : Color{mint.r, mint.g, mint.b, .72f})
+                : (highlighted ? Color{.18f, .36f, .36f, .62f} : Color{.06f, .16f, .20f, .38f});
+        draw_rect(r, bounds, 16 * s, background);
+        draw_text(r, label, bounds.x + bounds.w * .5f,
+                  bounds.y + bounds.h * .5f + font_size * s * .32f, font_size * s,
+                  add ? Color{.035f, .15f, .14f} : text, true);
+    };
+    button(controls.quality, Control::kQuality,
+           compact ? (maximum ? "Ultra" : "High") : (maximum ? "ULTRA DETAIL" : "HIGH DETAIL"),
+           compact ? 16 : 15);
+    button(controls.pause, Control::kPause, paused ? "Resume" : "Pause", 18);
+    button(controls.add, Control::kAdd, compact ? "+" : "+  Add one", compact ? 24 : 22);
+    button(controls.reset, Control::kReset, "Reset", 18);
     return controls;
 }
 
@@ -390,20 +420,29 @@ void destroy(Scene* scene) noexcept {
 int hit_test(const Scene& scene, float x, float y) {
     return static_cast<int>(hit_test(scene.controls, x, y));
 }
-Result<void> render_scene(Scene& scene, float time, float yaw, bool maximum, int count, int pressed,
-                          float fps, bool paused, Rect safe, bool saved, bool overlay) {
+Result<bool> render_scene(Scene& scene, double time, float yaw, bool maximum, int count,
+                          int pressed, float fps, bool paused, Rect content, bool saved,
+                          bool overlay, float density, float zoom) {
+    if (!std::isfinite(zoom) || zoom < kMinimumZoom || zoom > kMaximumZoom)
+        return std::unexpected(Error{"Invalid camera zoom"});
     Renderer& r = *scene.renderer;
-    if (auto result = prepare_frame(r, maximum); !result)
+    if (auto result = prepare_frame(r, maximum); !result || !*result)
         return result;
     build_scene(scene, time, maximum);
     auto stats = get_stats(r);
-    safe = safe_area(safe, stats.width, stats.height);
-    if (auto result = render(r, camera(time, yaw, float(stats.width) / stats.height), {0, 1.25f, 0},
-                             time, maximum);
-        !result)
-        return std::unexpected(result.error());
-    scene.controls = overlay ? draw_overlay(r, safe, count, pressed, fps, maximum, paused, saved)
-                             : layout_controls(safe);
-    return present(r);
+    Rect safe = safe_area(content, stats.width, stats.height);
+    // Insets and control placement affect only the overlay. The camera always
+    // uses the full window, so the world continues behind every control.
+    if (auto result = render(r, camera(time, yaw, float(stats.width) / stats.height, zoom),
+                             {0, 1.55f, 0}, time, maximum);
+        !result || !*result)
+        return result;
+    Controls controls =
+        overlay ? draw_overlay(r, safe, count, pressed, fps, maximum, paused, saved, density)
+                : layout_controls(safe, density);
+    auto presented = present(r);
+    if (presented && *presented)
+        scene.controls = controls;
+    return presented;
 }
 }  // namespace native_buttons

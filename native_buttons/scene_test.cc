@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <numbers>
 #include <vector>
 
 #include "common/gpu/renderer.h"
+#include "native_buttons/controls.h"
 #include "native_buttons/scene.h"
 
 // Record the actual scene's submitted geometry without a GPU. This catches
@@ -12,7 +14,9 @@ namespace gpu {
 struct Renderer {
     unsigned next_mesh = 7;
     int width = 400, height = 720;
+    bool defer_present = false;
     std::vector<float> islands, rocks;
+    Vec3 eye;
 };
 void clear_instances(Renderer& r) {
     r.islands.clear();
@@ -35,16 +39,17 @@ common::Result<MeshId> create_mesh(Renderer& r, std::span<const Vertex> vertices
             return std::unexpected(common::Error{"Scene mesh index is out of bounds"});
     return r.next_mesh++;
 }
-common::Result<void> prepare_frame(Renderer&, bool) {
-    return {};
+common::Result<bool> prepare_frame(Renderer&, bool) {
+    return true;
 }
-common::Result<void> render(Renderer&, Vec3 eye, Vec3, float, bool) {
+common::Result<bool> render(Renderer& r, Vec3 eye, Vec3, double, bool) {
     if (!std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z))
         return std::unexpected(common::Error{"Invalid camera"});
-    return {};
+    r.eye = eye;
+    return true;
 }
-common::Result<void> present(Renderer&) {
-    return {};
+common::Result<bool> present(Renderer& r) {
+    return !r.defer_present;
 }
 void draw_rect(Renderer&, Rect, float, Color) {
 }
@@ -64,9 +69,10 @@ int main() {
     if (!scene)
         return 1;
     for (bool maximum : {false, true}) {
-        for (float time : {0.f, 76.9f, 80.f, 105.f, 120.f, 3600.f, 86400.f}) {
-            if (!native_buttons::render_scene(**scene, time, .34f, maximum, 0, 0, 60, false,
-                                              {0, 0, 400, 720}))
+        for (double time : {0., 76.9, 80., 105., 120., 3600., 86400., 524288., 31536000.}) {
+            auto rendered = native_buttons::render_scene(**scene, time, .34f, maximum, 0, 0, 60,
+                                                         false, {0, 0, 400, 720});
+            if (!rendered || !*rendered)
                 return 2;
             auto in_range = [](float x) { return x >= -22 && x < 22; };
             if (renderer.islands.size() != (maximum ? 16u : 9u) || renderer.rocks.size() != 24 ||
@@ -77,6 +83,28 @@ int main() {
             }
         }
     }
+    // A single frame must still move scenery and camera after days or a year,
+    // including frames spanning either periodic clock's wrap boundary.
+    for (double time : {65536., 262144., 524288., 31536000.,
+                        200 * std::numbers::pi * 1000 - 1. / 120, 600000. - 1. / 120}) {
+        auto first = native_buttons::render_scene(**scene, time, .34f, false, 0, 0, 60, false, {});
+        if (!first || !*first)
+            return 10;
+        auto islands = renderer.islands;
+        auto eye = renderer.eye;
+        auto second =
+            native_buttons::render_scene(**scene, time + 1. / 60, .34f, false, 0, 0, 60, false, {});
+        if (!second || !*second)
+            return 11;
+        for (size_t i = 0; i < islands.size(); ++i) {
+            float moved = gpu::wrap(renderer.islands[i] - islands[i] + 22.f, 44.f) - 22.f;
+            if (std::abs(moved + 2.6 / 60) > .00001)
+                return 12;
+        }
+        float camera_moved = gpu::length(renderer.eye - eye);
+        if (camera_moved < .001f || camera_moved > .1f)
+            return 13;
+    }
     const struct {
         float x, y;
         int expected;
@@ -85,6 +113,43 @@ int main() {
     for (auto tap : taps)
         if (native_buttons::hit_test(**scene, tap.x, tap.y) != tap.expected)
             return 4;
-    std::puts("Actual scenery wraps through 24 hours; control hit regions and meshes passed");
+    renderer.width = 720;
+    renderer.height = 320;
+    renderer.defer_present = true;
+    auto deferred = native_buttons::render_scene(**scene, 0, .34f, false, 0, 0, 0, true, {});
+    if (!deferred || *deferred || native_buttons::hit_test(**scene, 100, 650) != 1)
+        return 5;
+    renderer.defer_present = false;
+    auto resized = native_buttons::render_scene(**scene, 0, .34f, false, 0, 0, 0, true, {});
+    if (!resized || !*resized || native_buttons::hit_test(**scene, 100, 650) != 0 ||
+        native_buttons::hit_test(**scene, 523, 248) != 1)
+        return 6;
+    // Exercise real physical densities, both orientations, insets and short/narrow
+    // windows. Controls must remain usable, disjoint and inside the safe rectangle.
+    for (float density : {1.f, 2.625f, 3.f, 4.f}) {
+        for (auto size :
+             {gpu::Rect{0, 0, 360, 800}, gpu::Rect{0, 0, 800, 360}, gpu::Rect{0, 0, 720, 200},
+              gpu::Rect{0, 0, 200, 300}, gpu::Rect{0, 0, 200, 800}}) {
+            gpu::Rect safe{10 * density, 24 * density, size.w * density, size.h * density};
+            auto c = native_buttons::layout_controls(safe, density);
+            const gpu::Rect buttons[] = {c.add, c.reset, c.quality, c.pause};
+            for (int i = 0; i < 4; ++i) {
+                auto a = buttons[i];
+                if (a.w < 48 * density || a.h < 48 * density || a.x < safe.x || a.y < safe.y ||
+                    a.x + a.w > safe.x + safe.w || a.y + a.h > safe.y + safe.h)
+                    return 7;
+                if (static_cast<int>(
+                        native_buttons::hit_test(c, a.x + a.w * .5f, a.y + a.h * .5f)) != i + 1)
+                    return 8;
+                for (int j = i + 1; j < 4; ++j) {
+                    auto b = buttons[j];
+                    if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h)
+                        return 9;
+                }
+            }
+        }
+    }
+    std::puts(
+        "Long-running scenery/camera motion, phase wraps, control hit regions and meshes passed");
     return 0;
 }

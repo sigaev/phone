@@ -1,8 +1,9 @@
 # native_buttons
 
 A native C++23 Android app with an animated 3D pelican riding a bicycle along
-a coastal causeway. The counter and its saved value remain available below
-the scene. The app requests no permissions and works offline.
+a coastal causeway. The scene fills the window in both orientations, with
+translucent controls floating over it: a bottom panel in portrait and a side
+panel in landscape. The app requests no permissions and works offline.
 
 Rendering uses hardware Vulkan 1.1, with instanced geometry,
 physically based lighting, animated water, soft shadow mapping, floating-point
@@ -11,6 +12,11 @@ The reusable renderer lives in `//common/gpu`; the pelican, bicycle, scenery,
 animation shaders, and controls live in this directory. The pelican pedals,
 breathes, blinks, and flexes its neck and wings; its scarf deforms on the GPU.
 There is no software rasterizer.
+On-screen rendering requires `VK_EXT_swapchain_maintenance1` and its instance
+dependencies. Presentation fences keep swapchain images and semaphores alive
+until the display has released them, including during rotation and shutdown.
+Drivers without this support receive a startup error; offscreen rendering does
+not require the extension.
 Text uses a GPU atlas baked from the device's Roboto font with the shared
 `@stb//:stb_truetype` library fetched by Bazel. Its upstream header includes
 its license; no third-party source is copied into this repository.
@@ -20,8 +26,12 @@ Enter, Space, or the D-pad center activates the focused control. These GPU-drawn
 controls still do not expose TalkBack accessibility nodes.
 
 The camera circles the pelican once per minute with a gentle rise and fall and
-small distance changes. Drag to adjust the view through a full circle. Pause
-freezes both the animation and the automatic camera motion; dragging still works.
+small distance changes. Drag to adjust the view through a full circle. Spread
+two fingers to zoom in and pinch them together to zoom out, from 0.5x to 2.5x.
+Pinching cancels pending button taps and keeps the controls at their normal size.
+After a pinch, lift both fingers before starting another one-finger drag or tap. Pause
+freezes both the animation and the automatic camera motion and stops continuous
+rendering. Controls, dragging, and window redraws still update the paused scene.
 The feet and crank arms share the same forward-pedaling motion.
 **High detail** uses native resolution,
 4x MSAA, 2048-pixel shadows, and 16,384 particles. **Ultra detail** uses
@@ -32,6 +42,33 @@ display mode, and stops when the Activity pauses or loses its window.
 Rendering and counter persistence run on a dedicated native thread. Required
 window-redraw callbacks wait for a completed frame, including while paused;
 window-destruction callbacks wait until the worker releases the surface.
+Temporary surface unavailability and out-of-date swapchains defer frames for a
+later retry. Redraws, state snapshots, surface detachment, and shutdown have
+three-second monotonic deadlines, including when Choreographer stops delivering
+callbacks. A redraw or snapshot timeout reports an error and allows one further
+second for cleanup. If the worker cannot release its window or stop by the
+deadline, the process terminates rather than returning with live window users
+or blocking the main thread indefinitely. GPU fence waits are also bounded.
+Each frame prepares its targets once; a subsequent window-size change defers the
+frame so camera, overlay, and touch coordinates stay aligned. Input uses the
+controls from the last successfully presented frame. Rebuilt render targets
+become ready only after all resources are created; offscreen capture requires a
+new frame after target replacement. Tap cancellation measures displacement from
+the initial touch using Android's density-aware `ViewConfiguration` tolerance,
+refreshed when the device configuration changes.
+Rotation reads the current extent and transform from Vulkan surface capabilities;
+Android's buffer dimensions can still describe the old swapchain. The camera
+and scene use the full window; only the overlays respect content insets.
+Controls retain at least 48 dp touch targets. Short windows use a compact
+translucent toolbar instead of shrinking the buttons.
+Android's saved Activity state includes the count, detail setting, pause state,
+camera yaw, zoom, and animation time in a validated, versioned record. Version 1
+records use the default zoom; legacy count-only records remain supported too.
+Animation time is accumulated and saved in double precision. CPU and shader
+oscillations use a shared bounded phase, while scenery, camera orbit, road
+markings, and particles retain their own cycles, so long sessions keep animating
+without a visible reset. Version 1 and 2 records retain their original time and
+available settings when upgraded to the double-precision format.
 Counter updates replace the saved file atomically after flushing a temporary
 file, so a failed write preserves the previous value. Save failures are shown
 in the counter panel and in an Android toast.
@@ -75,8 +112,10 @@ bazel run //native_buttons:gpu_probe --platforms=//:arm64-v8a \
     --run_under=//tools:android_test_runner -- /tmp/pelican.ppm 1080 2400 0
 ```
 
-Use `1` instead of `0` for Ultra detail. An optional final argument sets the
-animation start time in seconds, useful for inspecting different camera angles.
+Use `1` instead of `0` for Ultra detail. Optional arguments after the quality
+flag set the animation start time in seconds, pixels per dp, and zoom. The default
+density gives the shorter image dimension a width of 360 dp. For example,
+`/tmp/landscape.ppm 960 432 0 12 1.2 1.5` renders an 800-by-360 dp landscape view at 1.5x zoom.
 Probe throughput is a synchronous
 offscreen measurement, not a claim about the installed app's sustained frame
 rate. Display composition, thermal limits, and frame pacing affect the app.
@@ -89,24 +128,45 @@ Run the native regression suite on the phone:
 
 ```sh
 bazel test //common:runtime_test //native_buttons:application_test \
-    //native_buttons:scene_test //native_buttons:renderer_test \
+    //native_buttons:runtime_fault_test //native_buttons:scene_test \
+    //native_buttons:state_test //native_buttons:gestures_test //native_buttons:renderer_test \
+    //native_buttons:presentation_test \
     //native_buttons:depth_fallback_test --platforms=//:arm64-v8a \
     --run_under=//tools:android_test_runner
 ```
 
 The application test exercises atomic persistence with an injected failed write,
-worker startup/shutdown, touch cancellation, keyboard navigation, lifecycle
+worker startup/shutdown, touch jitter and scaled cancellation, keyboard navigation, lifecycle
 snapshots, paused redraw, insets, and surface recreation. The scene test checks
-actual scenery positions through 24 hours of animation and control hit testing.
-GPU tests exercise portrait and landscape offscreen targets, quality changes,
-readback, and fixed-quality animation with
-the changing UI excluded. The depth-fallback test simulates unsupported D24S8
-and renders with another format on the real GPU.
+actual scenery positions through a year of animation, phase-wrap continuity, and
+control hit testing, including retaining the previous layout when presentation is
+deferred. The
+runtime fault test runs the real worker and scene with a simulated GPU boundary:
+it checks transient retries, resizing during a frame, visible button hit targets,
+and redraw timeout/cleanup when no vsync callbacks arrive. Subprocess checks
+verify bounded snapshots, detachment and shutdown with a stalled worker or GPU
+destructor. State tests cover round trips, legacy data, and malformed records.
+Gesture tests exercise real motion-event handling with synthetic Android pointers,
+including reordered indices, extra fingers, near-zero spans, cancellation,
+single-finger taps after pinching, and chronological processing of batched motion.
+The real-worker tests check batched excursions that return inside a Reset button,
+valid batched jitter, and 60 Hz clock updates after days of saved animation time.
+Application tests cover zoom limits, paused zooming, accidental-tap prevention,
+and zoom restoration across recreation.
+GPU tests exercise portrait and landscape offscreen targets, preparation boundaries, quality changes,
+readback, camera zoom at both limits, and fixed-quality animation with
+the changing UI excluded. Fixed-camera captures also check shader-driven motion
+at large timestamps and across phase wraps. The depth-fallback test simulates
+unsupported D24S8 and renders with another format on the real GPU.
+The presentation test uses real GPU commands with a simulated display boundary
+to exercise stale buffer dimensions, all four rotations, resize races, transient
+swapchain failures, and presentation-fence retirement.
 
 Enable Khronos API and synchronization validation for the GPU tests:
 
 ```sh
 bazel test //native_buttons:renderer_test //native_buttons:depth_fallback_test \
+    //native_buttons:presentation_test \
     --platforms=//:arm64-v8a --define=vulkan_validation=true \
     --run_under=//tools:vulkan_validation_runner
 ```
@@ -115,7 +175,7 @@ The optional runner downloads the pinned Android validation layer through Bazel.
 Its Android layer-path bootstrap and validation callbacks are compiled only with
 that flag; neither they nor the validation library are included in the normal APK.
 
-Offscreen tests do not verify Android's compositor or the real Activity window.
+These tests do not verify Android's compositor or the real Activity window.
 After installation, check portrait, landscape and reverse landscape, touch and
 keyboard controls, rotation while paused, background/resume, and Activity
 recreation. The counter and controls should remain upright and aligned with

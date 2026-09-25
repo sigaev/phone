@@ -4,6 +4,7 @@ layout(set = 0, binding = 0, std140) uniform Globals {
     mat4 u_light;
     vec4 u_eye_time;
     vec4 u_size;
+    vec4 u_animation_clock;
 };
 #define u_time u_eye_time.w
 #define u_eye u_eye_time.xyz
@@ -53,7 +54,7 @@ void main() {
         metal = .58;
     } else if (v_material.w > 1.5 && v_material.w < 2.5) {
         float lane = (1. - smoothstep(.025, .045, abs(v_position.z))) *
-                     step(.32, fract((v_position.x + u_time * 2.6) * .35));
+                     step(.32, fract((v_position.x + u_animation_clock.z * 2.6) * .35));
         float edge = 1. - smoothstep(.013, .027, abs(abs(v_position.z) - .88));
         base = mix(base, vec3(.93, .74, .34), max(lane, edge * .7));
     } else if (v_material.w > 2.5) {

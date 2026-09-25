@@ -26,6 +26,10 @@ Vec3 unit(Vec3 value);
 bool contains(Rect rect, float x, float y);
 // Wrap to [0, period), including negative values. period must be positive.
 float wrap(float value, float period);
+double wrap(double value, double period);
+// Bounded seconds for oscillations whose angular rates are multiples of 0.01.
+// These motions share a 200*pi-second cycle; wrapping preserves their phase.
+float oscillation_time(double seconds);
 Mat4 translation(Vec3 position);
 Mat4 scale(Vec3 size);
 Mat4 rotate_x(float angle);

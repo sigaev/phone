@@ -41,13 +41,16 @@ void add(Renderer& renderer, Shape shape, Mat4 model, Color color, float roughne
          float metal = 0, float emission = 0, float kind = 0);
 void add(Renderer& renderer, MeshId mesh, Mat4 model, Color color, float roughness = .45f,
          float metal = 0, float emission = 0, float kind = 0);
-// Refresh target dimensions before constructing the camera and UI layout.
-common::Result<void> prepare_frame(Renderer& renderer, bool maximum);
-common::Result<void> render(Renderer& renderer, Vec3 eye, Vec3 target, float time, bool maximum);
+// Frame operations return false when the surface is temporarily unavailable.
+// Retry from prepare_frame on a later frame; do not continue to render/present.
+// Prepare once before constructing the camera and UI layout. render() preserves
+// these dimensions, deferring the frame if the window changes in the meantime.
+common::Result<bool> prepare_frame(Renderer& renderer, bool maximum);
+common::Result<bool> render(Renderer& renderer, Vec3 eye, Vec3 target, double time, bool maximum);
 void draw_rect(Renderer& renderer, Rect bounds, float radius, Color color);
 void draw_text(Renderer& renderer, const char* value, float x, float baseline, float height,
                Color color, bool centered = false);
-common::Result<void> present(Renderer& renderer);
+common::Result<bool> present(Renderer& renderer);
 common::Result<void> capture_frame(Renderer& renderer, const char* ppm_path);
 common::Result<void> wait_frame(Renderer& renderer);
 // Capture tightly packed RGBA rows from top to bottom on an offscreen renderer.

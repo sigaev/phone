@@ -1,6 +1,7 @@
 #include "common/gpu/math.h"
 
 #include <cmath>
+#include <numbers>
 
 namespace gpu {
 Vec3 operator+(Vec3 a, Vec3 b) {
@@ -32,6 +33,15 @@ float wrap(float value, float period) {
     if (result < 0)
         result += period;
     return result < period ? result : 0.f;
+}
+double wrap(double value, double period) {
+    double result = std::fmod(value, period);
+    if (result < 0)
+        result += period;
+    return result < period ? result : 0.;
+}
+float oscillation_time(double seconds) {
+    return static_cast<float>(wrap(seconds, 200 * std::numbers::pi));
 }
 Mat4 translation(Vec3 p) {
     Mat4 m;
