@@ -89,6 +89,26 @@ class ClassifyTest(unittest.TestCase):
     self.assertEqual(verify.classify([entry], [], exported)[0][1], "not_found")
 
 
+class ClientSecretTest(unittest.TestCase):
+  def test_finds_downloaded_file_next_to_script(self):
+    with tempfile.TemporaryDirectory() as directory:
+      script = os.path.join(directory, "verify.py")
+      with (mock.patch.object(verify, "__file__", script),
+            contextlib.redirect_stdout(io.StringIO())):
+        with self.assertRaises(SystemExit) as missing:
+          verify.client_secret_path(None)
+        self.assertIn("console.cloud.google.com", str(missing.exception))
+        downloaded = os.path.join(
+          directory, "client_secret_123-abc.apps.googleusercontent.com.json")
+        open(downloaded, "w").close()
+        self.assertEqual(verify.client_secret_path(None), downloaded)
+        open(os.path.join(directory, "client_secret.json"), "w").close()
+        with self.assertRaises(SystemExit):
+          verify.client_secret_path(None)
+        with self.assertRaises(SystemExit):
+          verify.client_secret_path(os.path.join(directory, "absent.json"))
+
+
 class FakeGoogle(http.server.BaseHTTPRequestHandler):
   polls = 0
 

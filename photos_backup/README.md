@@ -56,8 +56,10 @@ matched by checksum, so their names do not matter.
    the app in **Testing** as an **External** app and add the account that
    holds the backups as a test user.
 4. Under **Clients**, create an OAuth client with application type
-   **Desktop app**. Download its JSON as `client_secret.json` next to
-   `verify.py`. It is ignored by Git.
+   **Desktop app**, and download its JSON from the dialog that appears after
+   creation. Put the downloaded `client_secret_….json` file next to
+   `verify.py`; `login` finds it there, or accepts `--client-secret PATH`.
+   The file is ignored by Git.
 
 Google expires refresh tokens for apps in Testing after seven days. Run
 `login` again when requests start failing with an authorization error.

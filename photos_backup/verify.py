@@ -15,6 +15,7 @@ import argparse
 import base64
 import collections
 import csv
+import glob
 import hashlib
 import http.server
 import json
@@ -69,6 +70,37 @@ def request_json(request):
 def post_form(url, fields):
   data = urllib.parse.urlencode(fields).encode()
   return request_json(urllib.request.Request(url, data=data, method="POST"))
+
+
+SETUP_HELP = """No OAuth client file found. Create one once in Google Cloud:
+
+  1. Create a project: https://console.cloud.google.com/projectcreate
+  2. Enable the Photos Picker API in it:
+     https://console.cloud.google.com/apis/library/photospicker.googleapis.com
+  3. Configure sign-in at https://console.cloud.google.com/auth/overview
+     (audience External); under Audience, add your Google account as a test
+     user.
+  4. At https://console.cloud.google.com/auth/clients, create a client of type
+     Desktop app and download its JSON from the dialog that appears.
+  5. Put the client_secret_....json file next to verify.py, or pass
+     --client-secret PATH.
+"""
+
+
+def client_secret_path(path):
+  """Returns path, or the one client_secret*.json file next to verify.py."""
+  if path:
+    if not os.path.exists(path):
+      sys.exit(f"{path} does not exist.\n\n{SETUP_HELP}")
+    return path
+  directory = os.path.dirname(os.path.abspath(__file__))
+  matches = sorted(glob.glob(os.path.join(directory, "client_secret*.json")))
+  if len(matches) > 1:
+    sys.exit("Several client_secret*.json files next to verify.py; choose one "
+             "with --client-secret")
+  if not matches:
+    sys.exit(SETUP_HELP)
+  return matches[0]
 
 
 def load_client(path):
@@ -126,7 +158,7 @@ class RedirectListener:
 
 
 def login(args):
-  client_id, client_secret = load_client(args.client_secret)
+  client_id, client_secret = load_client(client_secret_path(args.client_secret))
   # With --paste nothing listens: the browser shows a connection error, and
   # its address bar holds the code.
   listener = None if args.paste else RedirectListener()
@@ -461,8 +493,9 @@ def main():
   commands = parser.add_subparsers(dest="command", required=True)
 
   command = commands.add_parser("login", help="sign in to Google")
-  command.add_argument("--client-secret", default="client_secret.json",
-                       help="Desktop app OAuth client JSON")
+  command.add_argument("--client-secret",
+                       help="Desktop app OAuth client JSON (default: the "
+                            "client_secret*.json file next to verify.py)")
   command.add_argument("--account", help="suggested Google account")
   command.add_argument("--paste", action="store_true",
                        help="paste the redirect address instead of listening "
