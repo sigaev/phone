@@ -24,9 +24,9 @@ extern "C" VkResult __real_vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDe
 extern "C" VkResult __wrap_vkGetPhysicalDeviceImageFormatProperties(
     VkPhysicalDevice physical, VkFormat format, VkImageType type, VkImageTiling tiling,
     VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* properties) {
-  // Simulate a valid device without D24S8. All other capabilities and rendering
+  // Simulate a valid device without X8_D24. All other capabilities and rendering
   // still use the real driver, including the fallback depth/shadow images.
-  if (format == VK_FORMAT_D24_UNORM_S8_UINT) return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  if (format == VK_FORMAT_X8_D24_UNORM_PACK32) return VK_ERROR_FORMAT_NOT_SUPPORTED;
   return __real_vkGetPhysicalDeviceImageFormatProperties(physical, format, type, tiling, usage,
                                                          flags, properties);
 }

@@ -78,19 +78,20 @@ unsigned queue_family = 0;
 }
 
 extern "C" {
-VKAPI_ATTR VkResult VKAPI_CALL
-__real_vkEnumerateInstanceExtensionProperties(const char*, unsigned*, VkExtensionProperties*);
+VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateInstance(const VkInstanceCreateInfo*,
+                                                       const VkAllocationCallbacks*, VkInstance*);
 
-VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkEnumerateInstanceExtensionProperties(
-    const char* layer, unsigned* count, VkExtensionProperties* output) {
-  auto result = __real_vkEnumerateInstanceExtensionProperties(layer, count, output);
-  if (result == VK_SUCCESS && output && hide_maintenance) {
-    auto end = std::remove_if(output, output + *count, [](const auto& extension) {
-      return std::strcmp(extension.extensionName, VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) == 0;
-    });
-    *count = end - output;
-  }
-  return result;
+VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateInstance(const VkInstanceCreateInfo* info,
+                                                       const VkAllocationCallbacks* allocator,
+                                                       VkInstance* instance) {
+  if (hide_maintenance &&
+      std::any_of(info->ppEnabledExtensionNames,
+                  info->ppEnabledExtensionNames + info->enabledExtensionCount,
+                  [](const char* name) {
+                    return std::strcmp(name, VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) == 0;
+                  }))
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+  return __real_vkCreateInstance(info, allocator, instance);
 }
 
 int32_t __wrap_ANativeWindow_getWidth(ANativeWindow*) {
@@ -310,26 +311,6 @@ VKAPI_ATTR void VKAPI_CALL __wrap_vkDestroyFence(VkDevice device, VkFence fence,
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkDeviceWaitIdle(VkDevice) {
   require(false, "Device idle is not presentation completion");
   return VK_ERROR_UNKNOWN;
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateRenderPass(VkDevice, const VkRenderPassCreateInfo*,
-                                                         const VkAllocationCallbacks*,
-                                                         VkRenderPass*);
-
-VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateRenderPass(VkDevice device,
-                                                         const VkRenderPassCreateInfo* original,
-                                                         const VkAllocationCallbacks* allocator,
-                                                         VkRenderPass* pass) {
-  // The simulated display owns ordinary Vulkan images, so its final layout is
-  // GENERAL. All command recording, barriers, descriptors and GPU work are real.
-  auto info = *original;
-  std::vector<VkAttachmentDescription> attachments(info.pAttachments,
-                                                   info.pAttachments + info.attachmentCount);
-  for (auto& attachment : attachments)
-    if (attachment.finalLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-      attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
-  info.pAttachments = attachments.data();
-  return __real_vkCreateRenderPass(device, &info, allocator, pass);
 }
 }  // extern "C"
 

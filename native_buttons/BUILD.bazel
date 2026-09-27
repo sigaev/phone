@@ -232,7 +232,7 @@ cc_test(
     linkopts = [
         "-Wl,--wrap=ANativeWindow_getWidth",
         "-Wl,--wrap=ANativeWindow_getHeight",
-        "-Wl,--wrap=vkEnumerateInstanceExtensionProperties",
+        "-Wl,--wrap=vkCreateInstance",
         "-Wl,--wrap=vkCreateAndroidSurfaceKHR",
         "-Wl,--wrap=vkDestroySurfaceKHR",
         "-Wl,--wrap=vkGetPhysicalDeviceSurfaceSupportKHR",
@@ -247,7 +247,6 @@ cc_test(
         "-Wl,--wrap=vkDestroySemaphore",
         "-Wl,--wrap=vkDestroyFence",
         "-Wl,--wrap=vkDeviceWaitIdle",
-        "-Wl,--wrap=vkCreateRenderPass",
     ],
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],

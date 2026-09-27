@@ -1,6 +1,7 @@
 #version 450
 
-layout(set = 0, binding = 0, std140) uniform Globals {
+layout(push_constant) uniform Constants {
+  vec4 params;
   mat4 u_view;
   mat4 u_light;
   vec4 u_eye_time;
@@ -15,7 +16,7 @@ layout(set = 0, binding = 0, std140) uniform Globals {
 
 layout(local_size_x = 128) in;
 
-layout(std430, set = 0, binding = 3) buffer Particles { vec4 points[]; };
+layout(std430, set = 0, binding = 2) buffer Particles { vec4 points[]; };
 
 uint hash(uint x) {
   x ^= x >> 16;

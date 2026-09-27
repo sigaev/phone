@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.demo.nativebuttons" android:versionCode="4" android:versionName="3.0">
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
-    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00404000" android:required="true" />
     <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="true" />
     <application android:label="native_buttons" android:hasCode="false"
         android:allowBackup="false" android:extractNativeLibs="true"

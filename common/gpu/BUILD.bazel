@@ -46,5 +46,6 @@ cc_library(
     deps = [
         "//common:support",
         "@stb//:stb_truetype",
+        "@vulkan_headers",
     ],
 )

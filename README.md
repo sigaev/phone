@@ -4,7 +4,7 @@ The [native_buttons app](native_buttons/README.md) lives in `native_buttons/`.
 Shared code and build infrastructure stay outside app directories:
 
 - `common/` provides shared ownership, error handling, and Android runtime support.
-- `common/gpu/` provides the shared Vulkan 1.1 renderer, mesh primitives,
+- `common/gpu/` provides the shared Vulkan 1.4 renderer, mesh primitives,
   shadows, HDR, bloom, compute particles, and GPU text drawing.
 - `tools/spirv.bzl` compiles and validates optimized SPIR-V with the pinned NDK
   during the Bazel build. No shader compiler is linked into the app.
@@ -12,6 +12,8 @@ Shared code and build infrastructure stay outside app directories:
 - `MODULE.bazel`, `.bazelrc`, and `tools/` configure the toolchains.
 - `tools/android.bzl` exports `ANDROID_COPTS` and `ANDROID_LINKOPTS`
   for native apps to share C++23 compiler settings and Android linker flags.
+- The NDK's Vulkan headers predate 1.4, so Khronos's Vulkan-Headers come from
+  the Bazel Central Registry's `vulkan_headers` module.
 - stb is fetched by Bazel from a pinned upstream commit, verified by SHA-256,
   and exposed as `@stb//:stb_truetype`. No third-party sources are vendored.
 - libc++ sources are fetched from the LLVM revision recorded in NDK r29's

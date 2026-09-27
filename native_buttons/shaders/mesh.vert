@@ -1,6 +1,7 @@
 #version 450
 
-layout(set = 0, binding = 0, std140) uniform Globals {
+layout(push_constant) uniform Constants {
+  vec4 params;
   mat4 u_view;
   mat4 u_light;
   vec4 u_eye_time;
@@ -24,8 +25,6 @@ layout(location = 1) out vec3 v_normal;
 layout(location = 2) out vec4 v_color;
 layout(location = 3) out vec4 v_material;
 layout(location = 4) out vec4 v_shadow;
-
-layout(push_constant) uniform Pass { vec4 params; };
 
 void main() {
   vec4 p = a_model * vec4(a_position, 1.);

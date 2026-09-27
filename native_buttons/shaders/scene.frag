@@ -1,6 +1,7 @@
 #version 450
 
-layout(set = 0, binding = 0, std140) uniform Globals {
+layout(push_constant) uniform Constants {
+  vec4 params;
   mat4 u_view;
   mat4 u_light;
   vec4 u_eye_time;
@@ -18,7 +19,7 @@ layout(location = 1) in vec3 v_normal;
 layout(location = 2) in vec4 v_color;
 layout(location = 3) in vec4 v_material;
 layout(location = 4) in vec4 v_shadow;
-layout(set = 0, binding = 1) uniform sampler2DShadow u_shadow;
+layout(set = 0, binding = 0) uniform sampler2DShadow u_shadow;
 
 layout(location = 0) out vec4 frag;
 const vec3 kSun = normalize(vec3(-.5, .85, .45));

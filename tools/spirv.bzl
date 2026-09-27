@@ -4,12 +4,14 @@ def _spirv_shader_impl(ctx):
     binary = ctx.actions.declare_file(ctx.label.name + ".spv")
     raw_include = ctx.actions.declare_file(ctx.label.name + ".raw.inc")
     include = ctx.actions.declare_file(ctx.label.name + ".inc")
+
+    # The NDK shader tools stop at Vulkan 1.3, whose SPIR-V 1.6 is also Vulkan 1.4's.
     for output, extra in [(binary, []), (raw_include, ["-mfmt=c"])]:
         ctx.actions.run(
             executable = ctx.executable._compiler,
             inputs = [ctx.file.src],
             outputs = [output],
-            arguments = ["--target-env=vulkan1.1", "-Os"] + extra + [ctx.file.src.path, "-o", output.path],
+            arguments = ["--target-env=vulkan1.3", "-Os"] + extra + [ctx.file.src.path, "-o", output.path],
             mnemonic = "VulkanShader",
             progress_message = "Compiling Vulkan shader %{input}",
         )
@@ -18,7 +20,7 @@ def _spirv_shader_impl(ctx):
         tools = [ctx.executable._validator],
         outputs = [include],
         arguments = [ctx.executable._validator.path, binary.path, raw_include.path, include.path],
-        command = '"$1" --target-env vulkan1.1 "$2" && cp "$3" "$4"',
+        command = '"$1" --target-env vulkan1.3 "$2" && cp "$3" "$4"',
         mnemonic = "ValidateSpirv",
     )
     return [DefaultInfo(files = depset([include])), OutputGroupInfo(spirv = depset([binary]))]

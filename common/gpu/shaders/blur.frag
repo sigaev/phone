@@ -1,9 +1,9 @@
 #version 450
 
 layout(location = 0) in vec2 uv;
-layout(set = 0, binding = 1) uniform sampler2D u_image;
+layout(set = 0, binding = 0) uniform sampler2D u_image;
 
-layout(push_constant) uniform Pass { vec4 params; };
+layout(push_constant) uniform Constants { vec4 params; };
 
 #define u_direction params.xy
 #define u_extract int(params.z)

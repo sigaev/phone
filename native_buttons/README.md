@@ -5,9 +5,16 @@ along a coastal causeway. The scene fills the window in both orientations, with
 translucent controls floating over it: a bottom panel in portrait and a side
 panel in landscape. The app requests no permissions and works offline.
 
-Rendering uses hardware Vulkan 1.1, with instanced geometry,
+Rendering uses hardware Vulkan 1.4, with instanced geometry,
 physically based lighting, animated water, soft shadow mapping, floating-point
 HDR targets, multisample antialiasing, bloom, and compute-driven particles.
+Dynamic rendering, synchronization2 barriers, and push descriptors replace render
+passes, framebuffers, and descriptor pools. Per-frame values travel in the 256
+bytes of push constants that Vulkan 1.4 guarantees, and pipelines are built
+directly from SPIR-V without shader modules. Frames complete on fences: this
+phone's driver wakes from timeline-semaphore waits noticeably later. Depth uses
+stencil-free formats; dynamic rendering would otherwise preserve an unused
+stencil aspect.
 The reusable renderer lives in `//common/gpu`; the birds, bicycle, scenery,
 animation shaders, and controls live in this directory. The flamingo
 has soft pink plumage, a slender curved neck, and a short dark-tipped beak. It
@@ -109,8 +116,10 @@ the worker runtime, storage, scene, and shared renderer. `alwayslink`
 preserves the dynamically discovered `ANativeActivity_onCreate` entry point.
 Compiler and linker flags come from `//tools:android.bzl`, including
 C++23, full symbol stripping, and 16 KiB ELF segment alignment. Vulkan GLSL lives
-in `shaders/` and `//common/gpu/shaders`; Bazel compiles and validates SPIR-V with
-the pinned NDK shader tools and embeds it in the native library.
+in `shaders/` and `//common/gpu/shaders`; Bazel compiles and validates SPIR-V 1.6 with
+the pinned NDK shader tools and embeds it in the native library. Android's API 26
+stub library exports only Vulkan 1.0 commands, so the renderer loads the newer
+core commands it records from the driver.
 `//common:support` links libc++ runtime sources built by Bazel without exceptions,
 RTTI, or unwind tables. The prebuilt NDK C++ runtime, libc++abi, libunwind, and
 demangler are excluded. `std::nothrow` allocation still returns null on failure;
@@ -120,7 +129,8 @@ The `native_buttons`
 `android_binary` links `libnative_buttons.so`, processes the manifest, and
 packages, aligns, and signs the APK. The manifest's `android.app.lib_name`
 matches the shared library. The application ID is `dev.demo.nativebuttons`;
-minimum Android API is 26 and target API is 35.
+minimum Android API is 26 and target API is 35. The manifest requires Vulkan 1.4,
+matching the renderer's device check.
 
 The optional `gpu_probe` target renders and benchmarks the same scene on this
 phone's GPU using offscreen Vulkan images. It checks pipeline creation, render
@@ -183,7 +193,7 @@ readback, both bird workloads, switching birds at a frozen timestamp, camera zoo
 at both limits, and fixed-quality animation with
 the changing UI excluded. Fixed-camera captures also check shader-driven motion
 at large timestamps and across phase wraps. The depth-fallback test simulates
-unsupported D24S8 and renders with another format on the real GPU.
+unsupported X8_D24 and renders with another format on the real GPU.
 The presentation test uses real GPU commands with a simulated display boundary
 to exercise delayed window-size reports, capabilities cached until presentation,
 all four rotations, transform-only changes,
