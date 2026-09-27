@@ -21,6 +21,10 @@ Shared code and build infrastructure stay outside app directories:
   generation disabled. Add any additional compiled standard-library facilities
   to this overlay as apps need them.
 
+The [photos_backup scripts](photos_backup/README.md) in `photos_backup/` find
+the phone's photos and videos that have original-quality copies in Google
+Photos.
+
 Build the app from the workspace root:
 
 ```sh

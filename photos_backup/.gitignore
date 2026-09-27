@@ -1,0 +1,8 @@
+__pycache__/
+client_secret*.json
+token.json
+picked.jsonl
+takeout.jsonl
+report.csv
+delete_journal.jsonl
+*.tmp
