@@ -1,13 +1,15 @@
 # Android Bazel workspace
 
-The [native_buttons app](native_buttons/README.md) lives in `native_buttons/`.
-Shared code and build infrastructure stay outside app directories:
+The [native_buttons app](native_buttons/README.md) lives in `native_buttons/`,
+and the [sudoku app](sudoku/README.md) in `sudoku/`. Shared code and build
+infrastructure stay outside app directories:
 
 - `common/` provides shared ownership, error handling, and Android runtime support.
 - `common/gpu/` provides the shared Vulkan 1.4 renderer, mesh primitives,
-  shadows, HDR, bloom, compute particles, and GPU text drawing.
+  shadows, HDR, bloom, compute particles, and GPU text drawing. Its overlay
+  mode draws only multisampled 2D shapes and text, for flat interfaces.
 - `tools/spirv.bzl` compiles and validates optimized SPIR-V with the pinned NDK
-  during the Bazel build. No shader compiler is linked into the app.
+  during the Bazel build. No shader compiler is linked into the apps.
 - `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform.
 - `MODULE.bazel`, `.bazelrc`, and `tools/` configure the toolchains.
 - `tools/android.bzl` exports `ANDROID_COPTS` and `ANDROID_LINKOPTS`
@@ -23,13 +25,14 @@ Shared code and build infrastructure stay outside app directories:
   generation disabled. Add any additional compiled standard-library facilities
   to this overlay as apps need them.
 
-Build the app from the workspace root:
+Build the apps from the workspace root:
 
 ```sh
-bazel build //native_buttons
+bazel build //native_buttons //sudoku
 ```
 
-The APK is `bazel-bin/native_buttons/native_buttons.apk`. Bazel compiles, links,
+The APKs are `bazel-bin/native_buttons/native_buttons.apk` and
+`bazel-bin/sudoku/sudoku.apk`. Bazel compiles, links,
 packages, aligns, and signs it, including on a fresh checkout. There are no
 build wrapper scripts, project `genrule` targets, or manually generated keys.
 
