@@ -41,6 +41,13 @@ VKAPI_ATTR VkBool32 VKAPI_CALL validation_message(VkDebugUtilsMessageSeverityFla
 }
 #endif
 constexpr int kAtlasSize = 1024;
+constexpr int kAtlasLevels = 11;
+// Glyphs are rasterized at this pixel height and filtered through mipmaps
+// when drawn smaller. Padding keeps neighbors apart through the fifth level.
+constexpr int kFontHeight = 128;
+constexpr int kFontPadding = 16;
+// Rows above the packed glyphs hold white texels for solid geometry.
+constexpr int kAtlasReserved = 4;
 constexpr unsigned kFrameCount = 2;
 constexpr VkFormat kHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkSampleCountFlagBits kSamples = VK_SAMPLE_COUNT_4_BIT;
@@ -95,6 +102,7 @@ struct Image {
   VkImageView view = VK_NULL_HANDLE;
   VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
   VkExtent2D extent{};
+  unsigned levels = 1;
 };
 
 void destroy(Image* image) noexcept {
@@ -198,6 +206,8 @@ struct Renderer {
       render_height = 0, shadow_size = 0, particle_count = 0;
   int observed_window_width = 0, observed_window_height = 0;
   bool maximum = false, recreate_surface = false, targets_ready = false, has_frame = false;
+  // Overlay renderers draw only multisampled UI geometry to the output.
+  bool overlay = false;
   float gpu_millis = 0;
   std::vector<Mesh> meshes;
   std::vector<UiVertex> ui;
@@ -266,24 +276,27 @@ Result<void> create_view(Renderer& r, Image& image, VkFormat format) {
   view.image = image.handle;
   view.viewType = VK_IMAGE_VIEW_TYPE_2D;
   view.format = format;
-  view.subresourceRange = {image.aspect, 0, 1, 0, 1};
+  view.subresourceRange = {image.aspect, 0, image.levels, 0, 1};
   VK_CHECK(vkCreateImageView(r.device, &view, nullptr, &image.view));
   return {};
 }
 
 Result<Owner<Image>> create_image(Renderer& r, int width, int height, VkFormat format,
                                   VkImageUsageFlags usage,
-                                  VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT) {
+                                  VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
+                                  unsigned levels = 1) {
   Owner<Image> image(new (std::nothrow) Image);
   if (!image) return fail("Cannot allocate image state");
   image->device = r.device;
   image->extent = {static_cast<unsigned>(width), static_cast<unsigned>(height)};
+  image->levels = levels;
   if (format == r.depth_format) image->aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
   VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   info.imageType = VK_IMAGE_TYPE_2D;
   info.format = format;
   info.extent = {image->extent.width, image->extent.height, 1};
-  info.mipLevels = info.arrayLayers = 1;
+  info.mipLevels = levels;
+  info.arrayLayers = 1;
   info.samples = samples;
   info.tiling = VK_IMAGE_TILING_OPTIMAL;
   info.usage = usage;
@@ -432,7 +445,7 @@ void transition(Renderer& r, std::initializer_list<const Image*> images, VkImage
     barrier.newLayout = to;
     barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image->handle;
-    barrier.subresourceRange = {image->aspect, 0, 1, 0, 1};
+    barrier.subresourceRange = {image->aspect, 0, image->levels, 0, 1};
   }
   VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
   dependency.imageMemoryBarrierCount = count;
@@ -539,8 +552,9 @@ Result<void> create_context(Renderer& r) {
   if (!r.physical) return fail("A hardware Vulkan 1.4 graphics/compute device is required");
   vkGetPhysicalDeviceMemoryProperties(r.physical, &r.memory);
   // Without a stencil aspect, dynamic rendering has no stencil contents to preserve.
-  bool depth_found = false;
+  bool depth_found = r.overlay;
   for (auto format : {VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM}) {
+    if (r.overlay) break;
     VkImageFormatProperties attachment{}, shadow{};
     auto attachment_result = vkGetPhysicalDeviceImageFormatProperties(
         r.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
@@ -582,7 +596,7 @@ Result<void> create_context(Renderer& r) {
   vulkan13.synchronization2 = vulkan13.dynamicRendering = vulkan13.maintenance4 = VK_TRUE;
   VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
   features.pNext = &vulkan13;
-  features.features.largePoints = VK_TRUE;
+  features.features.largePoints = !r.overlay;
   const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                               VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME};
   VkDeviceCreateInfo device{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
@@ -669,7 +683,9 @@ Result<void> create_layout(Renderer& r) {
   VK_CHECK(vkCreatePipelineLayout(r.device, &pipeline, nullptr, &r.pipeline_layout));
   VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
   sampler.magFilter = sampler.minFilter = VK_FILTER_LINEAR;
-  sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  // Only the font atlas has mipmaps; other sampled images have one level.
+  sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+  sampler.maxLod = VK_LOD_CLAMP_NONE;
   sampler.addressModeU = sampler.addressModeV = sampler.addressModeW =
       VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
   VK_CHECK(vkCreateSampler(r.device, &sampler, nullptr, &r.sampler));
@@ -677,11 +693,6 @@ Result<void> create_layout(Renderer& r) {
   sampler.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
   sampler.magFilter = sampler.minFilter = r.shadow_filter;
   VK_CHECK(vkCreateSampler(r.device, &sampler, nullptr, &r.shadow_sampler));
-  auto particles =
-      create_buffer(r, 65536 * sizeof(Color),
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, false);
-  if (!particles) return std::unexpected(particles.error());
-  r.particles = std::move(*particles);
   return {};
 }
 
@@ -759,7 +770,7 @@ Result<VkPipeline> create_pipeline(Renderer& r, std::span<const std::uint32_t> v
   VkPipelineMultisampleStateCreateInfo multisample{
       VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
   bool hdr = kind == Pipeline::kMesh || kind == Pipeline::kSky || particle;
-  multisample.rasterizationSamples = hdr ? kSamples : VK_SAMPLE_COUNT_1_BIT;
+  multisample.rasterizationSamples = hdr || (ui && r.overlay) ? kSamples : VK_SAMPLE_COUNT_1_BIT;
   VkPipelineDepthStencilStateCreateInfo depth{
       VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
   depth.depthTestEnable = mesh || particle;
@@ -807,7 +818,7 @@ Result<VkPipeline> create_pipeline(Renderer& r, std::span<const std::uint32_t> v
   return pipeline;
 }
 
-Result<void> create_pipelines(Renderer& r, SceneShaders shaders) {
+Result<void> create_scene_pipelines(Renderer& r, SceneShaders shaders) {
   struct PipelineSpec {
     Pipeline kind;
     std::span<const std::uint32_t> vertex, fragment;
@@ -821,7 +832,6 @@ Result<void> create_pipelines(Renderer& r, SceneShaders shaders) {
       {Pipeline::kParticle, kParticleVertex, kParticleFragment, &r.particle_pipeline},
       {Pipeline::kBlur, kFullVertex, kBlurFragment, &r.blur_pipeline},
       {Pipeline::kPost, kFullVertex, kPostFragment, &r.post_pipeline},
-      {Pipeline::kUi, kUiVertex, kUiFragment, &r.ui_pipeline},
   };
   for (auto spec : specs) {
     auto pipeline = create_pipeline(r, spec.vertex, spec.fragment, spec.kind);
@@ -924,6 +934,7 @@ Result<bool> create_swapchain(Renderer& r, const VkSurfaceCapabilitiesKHR& capab
 }
 
 Result<bool> ensure_targets(Renderer& r, bool maximum) {
+  if (r.overlay) maximum = false;
   int width = r.width, height = r.height;
   VkSurfaceCapabilitiesKHR capabilities{};
   if (r.window) {
@@ -958,8 +969,8 @@ Result<bool> ensure_targets(Renderer& r, bool maximum) {
   float scale = maximum ? 1.30f : 1.f;
   r.render_width = int(r.width * scale);
   r.render_height = int(r.height * scale);
-  r.shadow_size = maximum ? 4096 : 2048;
-  r.particle_count = maximum ? 65536 : 16384;
+  r.shadow_size = r.overlay ? 0 : maximum ? 4096 : 2048;
+  r.particle_count = r.overlay ? 0 : maximum ? 65536 : 16384;
   if (std::max({r.render_width, r.render_height, r.shadow_size}) >
       static_cast<int>(r.properties.limits.maxImageDimension2D))
     return fail("Requested image size exceeds the GPU limit");
@@ -976,7 +987,12 @@ Result<bool> ensure_targets(Renderer& r, bool maximum) {
   constexpr auto kDepthUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
   constexpr auto kTransient = VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
   int bw = std::max(1, r.render_width / 4), bh = std::max(1, r.render_height / 4);
-  const ImageSpec specs[] = {
+  // Overlay frames resolve their multisampled color directly into the output.
+  const ImageSpec overlay_specs[] = {
+      {&r.ms_color, r.render_width, r.render_height, r.output_format,
+       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | kTransient, kSamples},
+  };
+  const ImageSpec scene_specs[] = {
       {&r.hdr, r.render_width, r.render_height, kHdrFormat, kColorUsage, VK_SAMPLE_COUNT_1_BIT},
       {&r.ms_color, r.render_width, r.render_height, kHdrFormat,
        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | kTransient, kSamples},
@@ -987,6 +1003,8 @@ Result<bool> ensure_targets(Renderer& r, bool maximum) {
       {&r.bloom[0], bw, bh, kHdrFormat, kColorUsage, VK_SAMPLE_COUNT_1_BIT},
       {&r.bloom[1], bw, bh, kHdrFormat, kColorUsage, VK_SAMPLE_COUNT_1_BIT},
   };
+  std::span<const ImageSpec> specs = r.overlay ? std::span<const ImageSpec>(overlay_specs)
+                                               : std::span<const ImageSpec>(scene_specs);
   for (auto spec : specs) {
     auto image = create_image(r, spec.width, spec.height, spec.format, spec.usage, spec.samples);
     if (!image) return std::unexpected(image.error());
@@ -1022,34 +1040,63 @@ Result<void> create_font(Renderer& renderer) {
     if (!data.empty()) break;
   }
   if (data.empty()) return fail("Cannot load the system font");
-  std::vector<unsigned char> bitmap(kAtlasSize * kAtlasSize);
-  stbtt_bakedchar baked[96];
-  if (stbtt_BakeFontBitmap(data.data(), 0, 48, bitmap.data(), kAtlasSize, kAtlasSize, 32, 96,
-                           baked) <= 0)
-    return fail("Font atlas overflow");
-  for (int i = 0; i < 96; ++i) {
-    auto& b = baked[i];
-    renderer.glyphs[i] = {float(b.x0), float(b.y0), float(b.x1), float(b.y1),
-                          b.xoff,      b.yoff,      b.xadvance};
+  size_t total = 0;
+  for (int level = 0; level < kAtlasLevels; ++level) {
+    size_t size = kAtlasSize >> level;
+    total += size * size;
   }
-  // A white texel is shared by the solid UI geometry.
-  bitmap[0] = bitmap[1] = bitmap[kAtlasSize] = bitmap[kAtlasSize + 1] = 255;
+  std::vector<unsigned char> pixels(total);
+  stbtt_pack_context pack;
+  stbtt_packedchar packed[96];
+  if (!stbtt_PackBegin(&pack, pixels.data() + kAtlasReserved * kAtlasSize, kAtlasSize,
+                       kAtlasSize - kAtlasReserved, kAtlasSize, kFontPadding, nullptr))
+    return fail("Cannot allocate the font atlas packer");
+  int packed_all = stbtt_PackFontRange(&pack, data.data(), 0, kFontHeight, 32, 96, packed);
+  stbtt_PackEnd(&pack);
+  if (!packed_all) return fail("Font atlas overflow");
+  for (int i = 0; i < 96; ++i) {
+    auto& p = packed[i];
+    renderer.glyphs[i] = {float(p.x0), float(p.y0 + kAtlasReserved),
+                          float(p.x1), float(p.y1 + kAtlasReserved),
+                          p.xoff,      p.yoff,
+                          p.xadvance};
+  }
+  for (int y = 0; y < kAtlasReserved; ++y)
+    for (int x = 0; x < kAtlasReserved; ++x) pixels[y * kAtlasSize + x] = 255;
+  // Box-filter each level from the previous one; offsets stay multiples of four.
+  VkBufferImageCopy copies[kAtlasLevels]{};
+  size_t offset = 0;
+  for (int level = 0; level < kAtlasLevels; ++level) {
+    unsigned size = kAtlasSize >> level;
+    if (level) {
+      const unsigned char* source = pixels.data() + copies[level - 1].bufferOffset;
+      unsigned char* target = pixels.data() + offset;
+      unsigned wide = size * 2;
+      for (unsigned y = 0; y < size; ++y)
+        for (unsigned x = 0; x < size; ++x) {
+          const unsigned char* p = source + (y * 2) * wide + x * 2;
+          target[y * size + x] = (p[0] + p[1] + p[wide] + p[wide + 1] + 2) / 4;
+        }
+    }
+    copies[level].bufferOffset = offset;
+    copies[level].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, unsigned(level), 0, 1};
+    copies[level].imageExtent = {size, size, 1};
+    offset += size_t(size) * size;
+  }
   auto image = create_image(renderer, kAtlasSize, kAtlasSize, VK_FORMAT_R8_UNORM,
-                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            VK_SAMPLE_COUNT_1_BIT, kAtlasLevels);
   if (!image) return std::unexpected(image.error());
   renderer.font = std::move(*image);
-  auto staging = create_buffer(renderer, bitmap.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+  auto staging = create_buffer(renderer, pixels.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
   if (!staging) return std::unexpected(staging.error());
-  std::memcpy((*staging)->mapped, bitmap.data(), bitmap.size());
+  std::memcpy((*staging)->mapped, pixels.data(), pixels.size());
   auto& frame = renderer.frames[renderer.frame_index];
   if (auto result = begin_commands(renderer, frame); !result) return result;
   transition(renderer, {renderer.font.get()}, VK_IMAGE_LAYOUT_UNDEFINED,
              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-  VkBufferImageCopy copy{};
-  copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  copy.imageExtent = {kAtlasSize, kAtlasSize, 1};
   vkCmdCopyBufferToImage(frame.command, (*staging)->handle, renderer.font->handle,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kAtlasLevels, copies);
   transition(renderer, {renderer.font.get()}, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
              VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
   return submit_immediate(renderer, frame);
@@ -1147,7 +1194,7 @@ const Image& output(const Renderer& r) {
 // Discard and clear the targets, then render to them. Multisampled attachments
 // are resolved and discarded; other color targets and the shadow depth are stored.
 void begin_pass(Renderer& r, const Image* color, const Image* depth = nullptr,
-                const Image* resolve = nullptr) {
+                const Image* resolve = nullptr, Color clear = {0, 0, 0, 1}) {
   transition(r, {color, depth, resolve}, VK_IMAGE_LAYOUT_UNDEFINED,
              VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL);
   VkRenderingAttachmentInfo attachments[2]{};
@@ -1157,7 +1204,7 @@ void begin_pass(Renderer& r, const Image* color, const Image* depth = nullptr,
     attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachment.storeOp = resolve ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
   }
-  attachments[0].clearValue.color = {{0, 0, 0, 1}};
+  attachments[0].clearValue.color = {{clear.r, clear.g, clear.b, clear.a}};
   attachments[1].clearValue.depthStencil = {1, 0};
   VkRenderingInfo info{VK_STRUCTURE_TYPE_RENDERING_INFO};
   info.renderArea.extent = (color ? color : depth)->extent;
@@ -1248,8 +1295,30 @@ void add(Renderer& renderer, Shape shape, Mat4 model, Color color, float roughne
       {renderer.model_transform * model, color, {roughness, metal, emission, kind}});
 }
 
+void draw_triangle(Renderer& renderer, float x0, float y0, float x1, float y1, float x2, float y2,
+                   Color color) {
+  constexpr float kWhite = .5f / kAtlasSize;
+  renderer.ui.insert(renderer.ui.end(), {{x0, y0, kWhite, kWhite, color},
+                                         {x1, y1, kWhite, kWhite, color},
+                                         {x2, y2, kWhite, kWhite, color}});
+}
+
+void draw_line(Renderer& renderer, float x0, float y0, float x1, float y1, float width,
+               Color color) {
+  float dx = x1 - x0, dy = y1 - y0, length = std::sqrt(dx * dx + dy * dy);
+  if (!(length > 0)) return;
+  float nx = -dy / length * width * .5f, ny = dx / length * width * .5f;
+  draw_triangle(renderer, x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, color);
+  draw_triangle(renderer, x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, color);
+}
+
 void draw_rect(Renderer& renderer, Rect r, float radius, Color color) {
   radius = std::min(radius, std::min(r.w, r.h) * .5f);
+  if (!(radius > 0)) {
+    draw_triangle(renderer, r.x, r.y, r.x + r.w, r.y, r.x + r.w, r.y + r.h, color);
+    draw_triangle(renderer, r.x, r.y, r.x + r.w, r.y + r.h, r.x, r.y + r.h, color);
+    return;
+  }
   UiVertex center{r.x + r.w * .5f, r.y + r.h * .5f, .5f / kAtlasSize, .5f / kAtlasSize, color};
   std::vector<UiVertex> perimeter;
   perimeter.reserve(36);
@@ -1270,7 +1339,7 @@ void draw_rect(Renderer& renderer, Rect r, float radius, Color color) {
 
 void draw_text(Renderer& renderer, const char* value, float x, float baseline, float height,
                Color color, bool centered) {
-  float scale = height / 48;
+  float scale = height / kFontHeight;
   if (centered) {
     float width = 0;
     for (const unsigned char* p = reinterpret_cast<const unsigned char*>(value); *p; ++p)
@@ -1289,6 +1358,23 @@ void draw_text(Renderer& renderer, const char* value, float x, float baseline, f
       renderer.ui.insert(renderer.ui.end(), {a, b, c, a, c, d});
       x += g.advance * scale;
     }
+}
+
+Rect measure_text(const Renderer& renderer, const char* value, float height) {
+  float scale = height / kFontHeight, width = 0, top = 0, bottom = 0;
+  bool inked = false;
+  for (const unsigned char* p = reinterpret_cast<const unsigned char*>(value); *p; ++p)
+    if (*p >= 32 && *p < 128) {
+      const Glyph& g = renderer.glyphs[*p - 32];
+      if (g.y1 > g.y0) {
+        float glyph_top = g.yoff * scale, glyph_bottom = glyph_top + (g.y1 - g.y0) * scale;
+        top = inked ? std::min(top, glyph_top) : glyph_top;
+        bottom = inked ? std::max(bottom, glyph_bottom) : glyph_bottom;
+        inked = true;
+      }
+      width += g.advance * scale;
+    }
+  return {0, top, width, bottom - top};
 }
 
 void add(Renderer& renderer, MeshId mesh, Mat4 model, Color color, float roughness, float metal,
@@ -1341,7 +1427,9 @@ Result<bool> surface_changed(const Renderer& r) {
          ANativeWindow_getHeight(r.window) != r.observed_window_height;
 }
 
-Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximum) {
+namespace {
+// Wait for the frame's resources and acquire its output. False defers the frame.
+Result<bool> begin_frame(Renderer& r, bool maximum) {
   // Camera and UI coordinates refer to the targets prepared by the caller.
   // Never rebuild them here after that layout has been computed.
   if (!r.targets_ready || r.maximum != maximum || r.recreate_surface) return false;
@@ -1380,6 +1468,15 @@ Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximu
     // With compositor rotation, SUBOPTIMAL alone need not mean the window
     // dimensions changed. Recreating on every such frame would churn targets.
   }
+  return true;
+}
+}
+
+Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximum) {
+  if (r.overlay) return fail("Scene rendering requires scene shaders");
+  auto begun = begin_frame(r, maximum);
+  if (!begun || !*begun) return begun;
+  auto& frame = r.frames[r.frame_index];
   // Periodic shader motion gets bounded clocks. Seed-dependent particle
   // velocities use both halves of the elapsed time, reduced in the shader.
   float time_high = static_cast<float>(time);
@@ -1454,6 +1551,28 @@ Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximu
   bind(r, r.post_pipeline, {sampled(r.sampler, *r.hdr), sampled(r.sampler, *r.bloom[1])});
   vkCmdDraw(command, 3, 1, 0, 0);
   // UI is appended to this pass by present(), without another image store/load.
+  return true;
+}
+
+Result<bool> render_overlay(Renderer& r, Color background) {
+  if (!r.overlay) return fail("Overlay frames require an overlay renderer");
+  // Overlay frames have no scene instances; discard the previous frame's UI.
+  r.ui.clear();
+  auto begun = begin_frame(r, false);
+  if (!begun || !*begun) return begun;
+  auto& frame = r.frames[r.frame_index];
+  Constants constants{};
+  constants.size = {1, 0, float(r.width), float(r.height)};
+  if (auto result = begin_commands(r, frame); !result) return std::unexpected(result.error());
+  if (r.queries) {
+    vkCmdResetQueryPool(frame.command, r.queries, r.frame_index * 2, 2);
+    vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, r.queries,
+                        r.frame_index * 2);
+  }
+  vkCmdPushConstants(frame.command, r.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(constants),
+                     &constants);
+  // present() draws the UI and resolves the multisampled color into the output.
+  begin_pass(r, r.ms_color.get(), nullptr, &output(r), background);
   return true;
 }
 
@@ -1563,22 +1682,52 @@ Result<void> capture_frame(Renderer& r, const char* path) {
   return {};
 }
 
-Result<Owner<Renderer>> create_renderer(ANativeWindow* window, SceneShaders shaders,
-                                        int offscreen_width, int offscreen_height) {
+namespace {
+// Only create_renderer references the scene resources, so linking an overlay
+// renderer alone omits their pipelines, shaders, and meshes.
+Result<void> create_scene_resources(Renderer& r, SceneShaders shaders) {
+  auto particles =
+      create_buffer(r, 65536 * sizeof(Color),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, false);
+  if (!particles) return std::unexpected(particles.error());
+  r.particles = std::move(*particles);
+  if (auto result = create_scene_pipelines(r, shaders); !result) return result;
+  return create_geometry(r);
+}
+
+using SceneSetup = Result<void> (*)(Renderer&, SceneShaders);
+
+Result<Owner<Renderer>> create(ANativeWindow* window, int offscreen_width, int offscreen_height,
+                               SceneSetup scene, SceneShaders shaders) {
   Owner<Renderer> renderer(new (std::nothrow) Renderer);
   if (!renderer) return fail("Cannot allocate renderer state");
   auto& r = *renderer;
+  r.overlay = !scene;
   r.window = window;
   r.width = offscreen_width;
   r.height = offscreen_height;
   if (auto result = create_context(r); !result) return std::unexpected(result.error());
   if (auto result = create_layout(r); !result) return std::unexpected(result.error());
-  if (auto result = create_pipelines(r, shaders); !result) return std::unexpected(result.error());
+  if (scene)
+    if (auto result = scene(r, shaders); !result) return std::unexpected(result.error());
+  auto ui = create_pipeline(r, kUiVertex, kUiFragment, Pipeline::kUi);
+  if (!ui) return std::unexpected(ui.error());
+  r.ui_pipeline = *ui;
   if (auto result = create_font(r); !result) return std::unexpected(result.error());
-  if (auto result = create_geometry(r); !result) return std::unexpected(result.error());
   r.ui.reserve(12000);
   if (auto result = ensure_targets(r, false); !result) return std::unexpected(result.error());
   return renderer;
+}
+}
+
+Result<Owner<Renderer>> create_renderer(ANativeWindow* window, SceneShaders shaders,
+                                        int offscreen_width, int offscreen_height) {
+  return create(window, offscreen_width, offscreen_height, create_scene_resources, shaders);
+}
+
+Result<Owner<Renderer>> create_overlay_renderer(ANativeWindow* window, int offscreen_width,
+                                                int offscreen_height) {
+  return create(window, offscreen_width, offscreen_height, nullptr, {});
 }
 
 void destroy(Renderer* renderer) noexcept {

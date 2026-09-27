@@ -35,6 +35,11 @@ struct RenderStats {
 common::Result<common::Owner<Renderer>> create_renderer(ANativeWindow* window, SceneShaders shaders,
                                                         int offscreen_width = 0,
                                                         int offscreen_height = 0);
+// A renderer for flat interfaces: multisampled shapes and text drawn directly
+// to the window, without scene, shadow, particle, or post-processing passes.
+common::Result<common::Owner<Renderer>> create_overlay_renderer(ANativeWindow* window,
+                                                                int offscreen_width = 0,
+                                                                int offscreen_height = 0);
 void destroy(Renderer* renderer) noexcept;
 common::Result<MeshId> create_mesh(Renderer& renderer, std::span<const Vertex> vertices,
                                    std::span<const unsigned> indices);
@@ -54,9 +59,19 @@ common::Result<bool> surface_changed(const Renderer& renderer);
 // these dimensions, deferring the frame if the window changes in the meantime.
 common::Result<bool> prepare_frame(Renderer& renderer, bool maximum);
 common::Result<bool> render(Renderer& renderer, Vec3 eye, Vec3 target, double time, bool maximum);
+// Begin an overlay renderer's frame cleared to background, after
+// prepare_frame(renderer, false). Draw its contents, then present().
+common::Result<bool> render_overlay(Renderer& renderer, Color background);
 void draw_rect(Renderer& renderer, Rect bounds, float radius, Color color);
+void draw_triangle(Renderer& renderer, float x0, float y0, float x1, float y1, float x2, float y2,
+                   Color color);
+void draw_line(Renderer& renderer, float x0, float y0, float x1, float y1, float width,
+               Color color);
 void draw_text(Renderer& renderer, const char* value, float x, float baseline, float height,
                Color color, bool centered = false);
+// Ink bounds relative to the pen position on the baseline, so y is negative
+// above it. The width is the advance width that centered text uses.
+Rect measure_text(const Renderer& renderer, const char* value, float height);
 common::Result<bool> present(Renderer& renderer);
 common::Result<void> capture_frame(Renderer& renderer, const char* ppm_path);
 common::Result<void> wait_frame(Renderer& renderer);
