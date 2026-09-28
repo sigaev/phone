@@ -1,30 +1,46 @@
 # Android Bazel workspace
 
-The [native_buttons app](native_buttons/README.md) lives in `native_buttons/`,
-and the [sudoku app](sudoku/README.md) in `sudoku/`. Shared code and build
+The [Native Buttons app](native_buttons/README.md) lives in `native_buttons/`,
+and the [Sudoku app](sudoku/README.md) in `sudoku/`. Shared code and build
 infrastructure stay outside app directories:
 
-- `common/` provides shared ownership, error handling, and Android runtime support.
+- `common/` provides the `Owner` helper that destroys opaque objects, `Result`
+  and `Error` for `std::expected` error handling, and Android runtime support.
 - `common/gpu/` provides the shared Vulkan 1.4 renderer, mesh primitives,
   shadows, HDR, bloom, compute particles, and GPU text drawing. Its overlay
   mode draws only multisampled 2D shapes and text, for flat interfaces.
 - `tools/spirv.bzl` compiles and validates optimized SPIR-V with the pinned NDK
   during the Bazel build. No shader compiler is linked into the apps.
-- `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform.
+- `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform, which
+  `.bazelrc` selects for every build.
 - `MODULE.bazel`, `.bazelrc`, and `tools/` configure the toolchains.
-- `tools/android.bzl` exports `ANDROID_COPTS` and `ANDROID_LINKOPTS`
-  for native apps to share C++23 compiler settings and Android linker flags,
-  including full link-time optimization across all native libraries.
+- `.bazelrc` sets the compiler and linker flags for all Android code:
+  optimized C++23 for ARMv9-A without exceptions, RTTI, or unwind tables,
+  hidden symbols, full link-time optimization across all native libraries,
+  16 KiB page alignment, stripped output, and links to libandroid, liblog, and
+  libm. Targets add only their own flags, such as `-lvulkan` in `common/gpu`.
+  It also runs Bazel in batch mode with a 768 MiB JVM heap and at most four
+  jobs to stay within the phone's memory.
+- `tools/android.bzl` defines the on-device runner that `.bazelrc` uses for
+  every `bazel test` and `bazel run`. It copies each binary into Termux's
+  `/data/data/com.termux/files/usr/tmp` and starts it with Android's
+  `linker64`, so the Vulkan loader can reach the GPU driver.
+- `--config=vulkan_validation` compiles the renderer and GPU tests with
+  Khronos API and synchronization validation and runs them through
+  `//tools:vulkan_validation_runner`, which supplies the Android validation
+  layer from Khronos's pinned 1.4.321.0 release, verified by SHA-256. APKs
+  never include the layer.
 - The NDK's Vulkan headers predate 1.4, so Khronos's Vulkan-Headers come from
   the Bazel Central Registry's `vulkan_headers` module.
 - stb is fetched by Bazel from a pinned upstream commit, verified by SHA-256,
   and exposed as `@stb//:stb_truetype`. No third-party sources are vendored.
-- libc++ sources are fetched from the LLVM revision recorded in NDK r29's
-  `clang_source_info.md`, with a SHA-256 for every file. The
-  `tools/libcxx.BUILD.bazel` overlay compiles the runtime components needed by
-  the apps against the pinned NDK headers, with exceptions, RTTI, and unwind
-  generation disabled. Add any additional compiled standard-library facilities
-  to this overlay as apps need them.
+- `tools/libcxx.bzl` fetches libc++ sources from the LLVM revision recorded in
+  NDK r29's `clang_source_info.md`, with a SHA-256 for every file. The
+  `tools/libcxx.BUILD.bazel` overlay compiles `chrono`, `new`, `new_handler`,
+  `new_helpers`, `string`, `system_error`, and `verbose_abort` against the
+  pinned NDK headers with the `.bazelrc` flags, and adds `tools/no_unwind.ld`
+  to every link that uses it. Add any additional compiled standard-library
+  facilities to this overlay as apps need them.
 
 Build the apps from the workspace root:
 
@@ -33,8 +49,9 @@ bazel build //native_buttons //sudoku
 ```
 
 The APKs are `bazel-bin/native_buttons/native_buttons.apk` and
-`bazel-bin/sudoku/sudoku.apk`. Bazel compiles, links,
-packages, aligns, and signs it, including on a fresh checkout. There are no
+`bazel-bin/sudoku/sudoku.apk`. Bazel compiles, links, packages, aligns, and
+signs each APK with rules_android's debug key, including on a fresh checkout
+once `.bazelrc.local` holds the settings below. There are no
 build wrapper scripts, project `genrule` targets, or manually generated keys.
 Both apps require Android 16 (API 36), the ARMv9-A CPU of this phone, a Pixel 8
 Pro, and its Vulkan 1.4 GPU; there are no code paths for older releases or
@@ -46,7 +63,9 @@ the NDK's prebuilt C++ runtime and unwinder. `tools/no_unwind.ld` discards lefto
 unwind tables from startup objects and rejects exception, unwinding, or demangler
 entry points at link time. Recoverable application errors use `std::expected`;
 `std::nothrow` allocations return null on failure, while ordinary allocation
-failure and standard-library contract failures abort directly.
+failure and standard-library errors that would otherwise throw, such as
+`std::length_error`, abort directly. libc++ hardening keeps the NDK default,
+which is off.
 
 Use `clang-format` with the checked-in `.clang-format` for C++ and embedded
 shaders, and `buildifier` for Bazel/Starlark files. Both are mandatory; see
@@ -55,7 +74,7 @@ shaders, and `buildifier` for Bazel/Starlark files. Both are mandatory; see
 Check the runtime on this phone with:
 
 ```sh
-bazel test //common:runtime_test --platforms=//:arm64-v8a --run_under=//tools:android_test_runner
+bazel test //common:runtime_test
 ```
 
 The test checks allocation failure, allocator handlers, alignment, standard-library
@@ -81,12 +100,15 @@ Registry with pinned, checksum-verified ARM64 archives:
   and target API 36.
 
 The community builds replace Google's x86-64 host binaries. The patch in
-`tools/patches/` adapts the upstream Bazel module's Linux host
-constraints and NDK directory layout, and allows extracting platform-tools
-from the combined SDK archive, whose optional `lib64` directory is absent.
-NDK extraction keeps the shader compiler and validator, and skips bundled Python,
-IDE utilities, and debugger servers to fit the phone's storage. Extraction requires GNU `tar` with xz
-support; compiler tools, headers, sysroots, and runtime libraries are retained.
+`tools/patches/` adapts the upstream Bazel module's Linux host and Java
+toolchain constraints and NDK directory layout, and exposes the NDK's ARM64
+`glslc` and `spirv-val` to `tools/spirv.bzl`. It also adds a platform-tools
+strip prefix for the combined SDK archive, whose Build Tools have no optional
+`lib64` directory. NDK extraction keeps the shader tools and skips bundled
+Python, clangd, clang-tidy, BOLT, other unused LLVM analysis and debug-info
+tools, and `lldb-server` to fit the phone's storage. Extraction requires GNU
+`tar` and `xz`; compiler tools, headers, sysroots, and runtime libraries are
+retained.
 Downloads remain pinned by SHA-256 and declared as Bazel toolchain inputs.
 Compilation and linking use the downloaded NDK's compiler, headers, and sysroot.
 Android supplies the runtime system libraries.
@@ -96,10 +118,10 @@ build-time utilities. Their Java toolchains are downloaded by Bazel. Local
 execution is enabled because PRoot cannot provide Linux namespace sandboxing.
 The Java dependencies use the hermetic toolchain project's pinned Maven list
 to avoid [rules_android's live-resolution issue](https://github.com/bazelbuild/rules_android/issues/485).
-On this machine the host compiler is Debian GCC 14. Install it and the archive
-utilities required by the Android rules with
-`apt-get install g++-14 gcc-14 libc6-dev lld unzip zip`, then select it in
-`.bazelrc.local`:
+On this machine the host compiler is Debian GCC 14. Install it, the lld linker,
+and the archive utilities with
+`apt-get install g++-14 gcc-14 libc6-dev lld unzip xz-utils zip`, then select
+it in `.bazelrc.local`:
 
 ```text
 common --repo_env=CC=/usr/bin/gcc-14
@@ -125,6 +147,7 @@ inside APKs. `MODULE.bazel.lock` is excluded from Git.
 - [Bazel Android rules](https://github.com/bazelbuild/rules_android/tree/v0.7.3)
 - [Bazel Android NDK rules](https://github.com/bazelbuild/rules_android_ndk/tree/v0.1.5)
 - [Android page sizes](https://developer.android.com/guide/practices/page-sizes)
-- [stb_truetype](https://github.com/nothings/stb/blob/master/stb_truetype.h)
+- [stb_truetype](https://github.com/nothings/stb/blob/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760/stb_truetype.h)
+- [Vulkan validation layers](https://github.com/KhronosGroup/Vulkan-ValidationLayers/releases/tag/vulkan-sdk-1.4.321.0)
 - [ARM64 SDK archives](https://github.com/HomuHomu833/android-sdk-custom/releases/tag/37.0.0)
 - [ARM64 NDK archives](https://github.com/HomuHomu833/android-ndk-custom/releases/tag/r29)

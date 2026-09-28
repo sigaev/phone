@@ -1,35 +1,4 @@
-"""Shared compiler and linker settings for native Android apps."""
-
-ANDROID_COPTS = [
-    "-std=c++23",
-    "-fvisibility=hidden",
-    "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
-    "-fvisibility-global-new-delete-hidden",
-    "-fno-exceptions",
-    "-fno-rtti",
-    "-fno-unwind-tables",
-    "-fno-asynchronous-unwind-tables",
-    # Full link-time optimization inlines and discards code across libraries.
-    "-flto",
-]
-
-ANDROID_LINKOPTS = [
-    "-landroid",
-    "-llog",
-    "-lm",
-    "-Wl,--no-undefined",
-    # android_binary's native link does not honor --strip=always completely.
-    "-Wl,--strip-all",
-    # //common:support supplies libc++ built without exceptions or unwinding.
-    "-nostdlib++",
-    "--unwindlib=none",
-    "-Wl,-z,start-stop-visibility=hidden",
-    # Support devices with 16 KiB memory pages.
-    "-Wl,-z,max-page-size=16384",
-    "-Wl,-z,common-page-size=16384",
-    # Optimize the -flto bitcode from ANDROID_COPTS as one module.
-    "-flto",
-]
+"""Runs native Android tests on this phone."""
 
 def _android_test_runner_impl(ctx):
     runner = ctx.actions.declare_file(ctx.label.name)

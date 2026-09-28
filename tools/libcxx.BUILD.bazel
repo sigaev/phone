@@ -1,4 +1,3 @@
-load("@//tools:android.bzl", "ANDROID_COPTS", "ANDROID_LINKOPTS")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 # Compile the runtime components used by our apps against the pinned NDK headers.
@@ -22,9 +21,9 @@ cc_library(
         "src/include/overridable_function.h",
     ],
     additional_linker_inputs = ["@//tools:no_unwind.ld"],
-    copts = ANDROID_COPTS + ["-D_LIBCPP_BUILDING_LIBRARY"],
+    copts = ["-D_LIBCPP_BUILDING_LIBRARY"],
     includes = ["src"],
-    linkopts = ANDROID_LINKOPTS + ["-Wl,--script=$(location @//tools:no_unwind.ld)"],
+    linkopts = ["-Wl,--script=$(location @//tools:no_unwind.ld)"],
     target_compatible_with = ["@platforms//os:android"],
     visibility = ["//visibility:public"],
 )

@@ -9,8 +9,10 @@
 - Use shorthand labels when the target name matches the package name:
   `bazel build //native_buttons`, without a redundant `:native_buttons`.
 
-## Commit messages
+## Commits
 
+- Commit directly on `main` and push to `origin main`. Do not create branches
+  or pull requests.
 - Use a seven- or eight-word title that states the change.
 - Follow the title with a blank line and one short paragraph describing the
   change and its purpose. Use a second short paragraph when useful, such as

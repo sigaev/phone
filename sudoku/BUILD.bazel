@@ -1,7 +1,6 @@
 load("@rules_android//rules:rules.bzl", "android_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
-load("//tools:android.bzl", "ANDROID_COPTS", "ANDROID_LINKOPTS")
 
 package(default_visibility = ["//visibility:private"])
 
@@ -19,7 +18,6 @@ cc_library(
         "puzzle.h",
         "storage.h",
     ],
-    copts = ANDROID_COPTS,
     target_compatible_with = ["@platforms//os:android"],
     deps = ["//common:support"],
 )
@@ -34,7 +32,6 @@ cc_library(
         "app.h",
         "view.h",
     ],
-    copts = ANDROID_COPTS,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
         ":game",
@@ -46,8 +43,6 @@ cc_library(
 cc_library(
     name = "sudoku_lib",
     srcs = ["main.cc"],
-    copts = ANDROID_COPTS,
-    linkopts = ANDROID_LINKOPTS,
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
@@ -71,7 +66,6 @@ cc_test(
     name = "puzzle_test",
     size = "medium",
     srcs = ["puzzle_test.cc"],
-    copts = ANDROID_COPTS,
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
@@ -84,7 +78,6 @@ cc_test(
     name = "game_test",
     size = "small",
     srcs = ["game_test.cc"],
-    copts = ANDROID_COPTS,
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
@@ -97,7 +90,7 @@ cc_test(
     name = "app_test",
     size = "medium",
     srcs = ["app_test.cc"],
-    copts = ANDROID_COPTS + select({
+    copts = select({
         "//tools:vulkan_validation": ["-DNATIVE_BUTTONS_VULKAN_VALIDATION"],
         "//conditions:default": [],
     }),

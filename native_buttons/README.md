@@ -1,17 +1,19 @@
-# native_buttons
+# Native Buttons
 
 A native C++23 Android app with an animated 3D pelican or flamingo riding a bicycle
 along a coastal causeway. The scene fills the window in both orientations, with
-translucent controls floating over it: a bottom panel in portrait and a side
-panel in landscape. The app requests no permissions and works offline.
+translucent controls floating over it: in portrait, detail, pause, and bird
+toggles under the title and a counter panel at the bottom; in landscape, a side
+panel. The app requests no permissions, works offline, and keeps the screen on
+while it is shown.
 
 Rendering uses hardware Vulkan 1.4, with instanced geometry,
 physically based lighting, animated water, soft shadow mapping, floating-point
 HDR targets, multisample antialiasing, bloom, and compute-driven particles.
 Dynamic rendering, synchronization2 barriers, and push descriptors replace render
-passes, framebuffers, and descriptor pools. Per-frame values travel in the 256
-bytes of push constants that Vulkan 1.4 guarantees, and pipelines are built
-directly from SPIR-V without shader modules. Frames complete on fences: this
+passes, framebuffers, and descriptor pools. Per-frame values travel in 192 bytes
+of push constants, within the 256 that Vulkan 1.4 guarantees, and pipelines are
+built directly from SPIR-V without shader modules. Frames complete on fences: this
 phone's driver wakes from timeline-semaphore waits noticeably later. Depth uses
 stencil-free formats; dynamic rendering would otherwise preserve an unused
 stencil aspect.
@@ -21,14 +23,17 @@ has soft pink plumage, a slender curved neck, and a short dark-tipped beak. It
 pedals, breathes, and flexes its neck and wings; its large eyes glance around,
 blink, and flutter. Its mint scarf deforms on the GPU.
 There is no software rasterizer.
-On-screen rendering requires `VK_EXT_swapchain_maintenance1` and its instance
-dependencies. Presentation fences keep swapchain images and semaphores alive
-until the display has released them, including during rotation and shutdown.
-Drivers without this support receive a startup error; offscreen rendering does
-not require the extension.
-Text uses a GPU atlas baked from the device's Roboto font with the shared
-`@stb//:stb_truetype` library fetched by Bazel. Its upstream header includes
-its license; no third-party source is copied into this repository.
+On-screen rendering requires `VK_EXT_swapchain_maintenance1` with its instance
+dependencies, and `VK_GOOGLE_display_timing`. Presentation fences keep swapchain
+images and semaphores alive until the display has released them, including
+during rotation and shutdown. Drivers without this support receive a startup
+error; offscreen rendering requires neither extension.
+Text uses a GPU atlas baked from the device's
+`/system/fonts/RobotoStatic-Regular.ttf` with the shared `@stb//:stb_truetype`
+library fetched by Bazel. Printable ASCII glyphs are rasterized at 128 px into a
+1024-pixel atlas with 11 mipmap levels; a missing font is a startup error. The
+upstream header includes its license; no third-party source is copied into this
+repository.
 The app remains C++-only, using Android's built-in `NativeActivity` with no
 Java application sources or DEX code. Tab/Shift+Tab and arrow keys move focus;
 Enter, Space, or the D-pad center activates the focused control. These GPU-drawn
@@ -54,40 +59,51 @@ created with the scene, so switching needs no resource rebuild.
 **High detail** uses native resolution,
 4x MSAA, 2048-pixel shadows, and 16,384 particles. **Ultra detail** uses
 130% resolution, 4096-pixel shadows, more scenery, and 65,536 particles.
-The display shows measured frame rate and GPU time. The window requests the
-display's peak refresh rate, which the Activity reads from its display mode, as
-fixed-rate content, so Android keeps the display there. Animation emulates the
-peak rate divided by N, such as 120, 60, 40, 30, or 24 fps, on an exact grid of
-presentation times N refreshes apart. Android throttles an app's Choreographer
-to the rate the app presents at, so Choreographer only describes the upcoming
-vsyncs: their expected presentation times and how long before presentation a
-frame must be ready. A timer on the rendering thread starts each frame just in
-time for its slot, allowing for the average CPU and GPU time plus a lead, and
-the frame asks the display not to show it before the slot. The lead starts at
-2 ms and grows by 2 ms per late frame, up to a refresh, since GPU time varies
-from frame to frame; it shrinks slowly while frames are on time. Rendering is pipelined: the CPU
-records a frame while the GPU renders up to two earlier ones, and six swapchain
-images hold frames queued ahead of their presentation, so the rendering thread
-does not wait on the GPU or the compositor.
+The display shows measured frame rate and GPU time, except in the compact
+toolbar. The Activity reads the display's peak refresh rate, the fastest of its
+current mode and that mode's alternative rates, and the window requests it as
+fixed-rate content, so Android keeps the display there. Until Android reports
+it, the fastest refresh Choreographer has shown stands in. Animation emulates
+the peak rate divided by N, from 1 to 8, such as 120, 60, 40, 30, or 24 fps, on
+an exact grid of presentation times N refreshes apart; if the display still
+runs slower, the grid follows its refresh period. Android throttles an app's
+Choreographer to the rate the app presents at, so Choreographer only describes
+the upcoming vsyncs: their expected presentation times and how long before
+presentation a frame must be ready. A timer on the rendering thread starts each
+frame just in time for its slot, allowing for that latency, the average CPU and
+GPU time, and a lead. Through `VK_GOOGLE_display_timing`, the frame asks the
+display not to show it earlier than 2 ms before its slot. The lead starts at
+2 ms and grows by 2 ms per late frame, up to one refresh, since GPU time varies
+from frame to frame; it shrinks by 0.02 ms per frame on time, never below 2 ms.
+Rendering is pipelined: the CPU records a frame while the GPU renders up to two
+earlier ones, and at least six swapchain images, as the driver allows, hold
+frames queued ahead of their presentation, so at a sustainable rate the
+rendering thread does not wait on the GPU or the compositor.
 
-N is the smallest interval whose budget fits the lowest frame cost measured
-since the surface or detail level changed, where the cost is the larger of the
-CPU and GPU time, since the two overlap. The GPU also overlaps consecutive
-frames: on this phone, High sustains 120 fps with a measured GPU time of about
-9.4 ms against an 8.3 ms budget, so the budget allows 1.2 times its length.
-Each change starts at the peak rate, where GPU clocks run highest, and measures
-after 30 frames, or up to twice as long while the cost is still falling as the
-GPU warms up. A frame is late when display timing shows it reached the
-screen more than half a refresh later, relative to its requested time, than the
-previous frame, or when its thread woke too late to record it before the
-deadline. Late frames first lengthen the lead; with a full refresh of lead,
-four late frames within 120 raise a floor under N by one, so a few misses are
-tolerated, and the floor relaxes by one after each hold without misses. The GPU
-clock falls at slower rates, inflating the cost, so after a hold a faster rate
-whose budget is within 1.25 times the cost is measured again and kept if it
-fits. The hold starts at one second and doubles, up to 32 seconds, when a faster
-rate fails within five seconds. Late signals right after a rate or display mode
-change are ignored. The loop stops when the Activity pauses or loses its window.
+N is the smallest interval whose budget fits the frame cost, where the cost is
+the larger of the CPU and GPU time, since the two overlap. The GPU also overlaps
+consecutive frames: on this phone, High sustains 120 fps with a measured GPU
+time of about 9.4 ms against an 8.3 ms budget, so the budget allows 1.2 times
+its length. A new surface, detail level, or peak-rate report restarts
+measurement at the peak rate, where GPU clocks run highest; Android reports the
+peak rate on every configuration change, including rotation. Switching birds
+keeps N. The cost after 30 frames, or up to twice as long while it is still
+falling as the GPU warms up, sets N, and any cheaper frame afterwards lowers
+it. A frame is late when display timing shows it reached the screen more than
+half a refresh later, relative to its requested time, than the previous frame,
+or when its timer fired too late to record it before its deadline; that frame
+takes the next reachable slot. Late frames first lengthen the lead. Once the
+lead is a full refresh, four late frames within a 120-frame window set a floor
+one above the current N, so a few misses are tolerated. The floor stays until a
+hold has passed since N rose to it; then, while the current window has no late
+frames, it drops one step per frame until the cost sets N again. The GPU clock
+falls at slower rates, inflating the cost, so after a hold without late frames
+or a floor holding N up, the next faster rate is measured again if the cost
+exceeds its budget by at most 25%, and kept if it fits. The hold starts at one
+second and doubles, up to 32 seconds, when N slows within five seconds of
+speeding up; any other slowdown resets it to one second. Late signals are
+ignored for eight frames after a rate or display mode change. The loop stops
+when the Activity pauses or loses its window.
 Rendering and counter persistence run on a dedicated native thread. Required
 window-redraw callbacks wait for a completed frame, including while paused;
 window-destruction callbacks wait until the worker releases the surface.
@@ -106,25 +122,31 @@ become ready only after all resources are created; offscreen capture requires a
 new frame after target replacement. Tap cancellation measures displacement from
 the initial touch using Android's density-aware `ViewConfiguration` tolerance,
 refreshed when the device configuration changes.
-Rotation uses Vulkan's advertised extent and transform for render targets and
-independently monitors native-window dimensions. Android can cache the Vulkan
+Render targets follow Vulkan's advertised extent, and a transform change also
+rebuilds them; swapchains use the identity pre-transform and leave rotation to
+Android's compositor. The runtime independently monitors native-window
+dimensions. Android can cache the Vulkan
 extent until presentation, and either report can change after the last Activity
 callback. Each size source is compared with its own previous observation, so a
 cached extent still triggers the frame needed to refresh it. Checks after
 presentation then rebuild stale targets. Idle checks catch later changes without
 advancing paused animation, yaw, or zoom. The camera
 and scene use the full window; only the overlays respect content insets.
-Controls retain at least 48 dp touch targets. Short windows use a compact
-translucent toolbar instead of shrinking the buttons.
+Controls retain at least 48 dp touch targets in windows at least 160 dp wide.
+Windows narrower than 300 dp or shorter than 420 dp (280 dp in landscape) use a
+compact translucent toolbar without the title or frame statistics instead of
+shrinking the buttons.
 Android's saved Activity state includes the count, selected bird, detail setting,
 pause state, camera yaw, zoom, and animation time in a validated, versioned record.
-Only the current version 4 record is accepted; other data starts a new session,
-which shows the flamingo.
-Animation time is accumulated and saved in double precision. CPU and shader
+Only the current version 4 record is accepted; other data starts a new session
+with default settings, the count from `count.txt`, and the flamingo. A count
+restored from the Activity overrides `count.txt` and is written back; counts
+stay between 0 and 999,999.
+Animation time advances by the spacing of presentation slots, at most 0.1 s per
+frame, and is accumulated and saved in double precision. CPU and shader
 oscillations use a shared bounded phase, while scenery, camera orbit, road
 markings, and particles retain their own cycles, so long sessions keep animating
-without a visible reset. Version 1 and 2 records retain their original time and
-available settings when upgraded to the double-precision format.
+without a visible reset.
 Counter updates replace the saved file atomically after flushing a temporary
 file, so a failed write preserves the previous value. Save failures are shown
 in the counter panel and in an Android toast.
@@ -138,53 +160,67 @@ the workspace root:
 bazel build //native_buttons
 ```
 
-Output: `bazel-bin/native_buttons/native_buttons.apk`.
-`bazel build //...` also builds the app and shared libraries.
+Output: `bazel-bin/native_buttons/native_buttons.apk`, 82,203 bytes, with a v4
+`native_buttons.apk.idsig` beside it. `bazel build //...` builds both apps, the
+tests, and the tools.
 
 `native_buttons_lib` compiles the lifecycle/input adapter in `main.cc` and links
-the worker runtime, storage, scene, and shared renderer. `alwayslink`
-preserves the dynamically discovered `ANativeActivity_onCreate` entry point.
-Compiler and linker flags come from `//tools:android.bzl`, including
-C++23, link-time optimization across all native libraries, full symbol
-stripping, and 16 KiB ELF segment alignment. Vulkan GLSL lives
+the gesture handling, worker runtime, state and storage, scene, and shared
+renderer. `alwayslink` preserves the dynamically discovered
+`ANativeActivity_onCreate` entry point. Shared compiler and linker flags come
+from `.bazelrc`, including C++23 for ARMv9-A, hidden symbols, link-time
+optimization across all native libraries, full symbol stripping, and 16 KiB ELF
+segment alignment; targets add only their own libraries, such as
+`-lnativewindow`, and the tests' wrapped functions. Vulkan GLSL lives
 in `shaders/` and `//common/gpu/shaders`; Bazel compiles and validates SPIR-V 1.6 with
 the pinned NDK shader tools and embeds it in the native library. NDK r29's API 35
 stub library predates Vulkan 1.4, so the renderer loads its one Vulkan 1.4
-command, `vkCmdPushDescriptorSet`, from the driver.
+command, `vkCmdPushDescriptorSet`, and the display-timing commands from the
+driver.
 `//common:support` links libc++ runtime sources built by Bazel without exceptions,
 RTTI, or unwind tables. The prebuilt NDK C++ runtime, libc++abi, libunwind, and
 demangler are excluded. `std::nothrow` allocation still returns null on failure;
-ordinary allocation failure and standard-library contract failures abort.
+ordinary allocation failure and standard-library errors that would otherwise
+throw abort.
 Application errors continue to propagate through `std::expected`.
 The `native_buttons`
 `android_binary` links `libnative_buttons.so`, processes the manifest, and
 packages, aligns, and signs the APK. The manifest's `android.app.lib_name`
 matches the shared library. The application ID is `dev.demo.nativebuttons`;
-minimum and target Android API are 36. The manifest requires Vulkan 1.4,
-matching the renderer's device check.
+minimum and target Android API are 36, and the launcher label is
+**Native Buttons**. The manifest requires Vulkan 1.4 and hardware level 1,
+matching the renderer's device check. It disables backups, so the count is not
+in Android backups, keeps the native library compressed in the APK for
+extraction at installation, and handles orientation and size changes without
+recreating the Activity.
 
 The optional `gpu_probe` target renders and benchmarks the same scene on this
-phone's GPU using offscreen Vulkan images. It checks pipeline creation, render
-targets, synchronization and readback, and can save a PPM screenshot before installation:
+phone's GPU using offscreen Vulkan images. It renders 90 frames, times the last
+60, and, when given a path, reads back the last frame into a PPM screenshot
+before installation:
 
 ```sh
-bazel run //native_buttons:gpu_probe --platforms=//:arm64-v8a \
-    --run_under=//tools:android_test_runner -- /tmp/flamingo.ppm 1080 2400 0
+bazel run //native_buttons:gpu_probe -- /tmp/flamingo.ppm 1080 2400 0
 ```
 
-Use `1` instead of `0` for Ultra detail. Optional arguments after the quality
-flag set the animation start time in seconds, pixels per dp, zoom, and `pelican`
-or `flamingo` (the default). The default density gives the shorter image dimension
-a width of 360 dp. For example,
+All arguments are optional: the path, the size (1080x2400 by default, each side
+1 to 4096), the quality (`0` for High, any other number for Ultra), the
+animation start time in seconds (2 by default), pixels per dp, zoom (1 by
+default, 0.5 to 2.5), and `pelican` or `flamingo` (the default). The default
+density gives the shorter image dimension a width of 360 dp, and the overlay
+shows a count of 7. For example,
 `/tmp/landscape.ppm 960 432 0 12 1.2 1.5 pelican` renders the pelican in an
 800-by-360 dp landscape view at 1.5x zoom.
 Probe throughput is a synchronous
 offscreen measurement, not a claim about the installed app's sustained frame
 rate. Display composition, thermal limits, and frame pacing affect the app.
 
-The runner copies the executable to a temporary real Android `/data` path so the
-Vulkan loader can access the vendor GPU driver under PRoot, then removes it.
-GPU timestamps are available on this phone and appear in the overlay.
+`.bazelrc` runs every `bazel run` and `bazel test` under
+`//tools:android_test_runner`. It copies the executable to a temporary
+directory under Termux's real `/data` path so the Vulkan loader can access the
+vendor GPU driver under PRoot, runs it with Android's system linker, and removes
+the directory afterwards. GPU timestamps are available on this phone and appear
+in the overlay.
 
 Run the native regression suite on the phone:
 
@@ -192,62 +228,82 @@ Run the native regression suite on the phone:
 bazel test //common:runtime_test //native_buttons:application_test \
     //native_buttons:runtime_fault_test //native_buttons:scene_test \
     //native_buttons:state_test //native_buttons:gestures_test //native_buttons:renderer_test \
-    //native_buttons:presentation_test --platforms=//:arm64-v8a \
-    --run_under=//tools:android_test_runner
+    //native_buttons:presentation_test
 ```
 
-The application test exercises atomic persistence with an injected failed write,
-worker startup/shutdown, touch jitter and scaled cancellation, keyboard navigation, lifecycle
-snapshots, paused redraw, insets, and surface recreation. The scene test checks
-actual scenery positions through a year of animation, phase-wrap continuity, and
-control hit testing, including retaining the previous layout when presentation is
-deferred. The
-runtime fault test runs the real worker and scene with a simulated GPU boundary:
-it checks delayed rotation and resizing with no subsequent callback or input,
-zero-sized surface recovery, visible/hidden Activity transitions, surface
+`//common:runtime_test` checks the libc++ runtime, as described in the
+[workspace README](../README.md). The application test exercises atomic
+persistence with an injected failed write, the 0 to 999,999 count range, worker
+startup/shutdown, touch jitter and scaled cancellation, keyboard navigation,
+lifecycle snapshots, paused redraw, insets, a detached runtime drawing nothing,
+Reset saved during the pause handshake, and surface recreation. It also covers
+zoom limits, paused zooming, accidental-tap prevention, and zoom restoration
+across recreation, and touch and keyboard bird selection while paused and its
+restoration. The scene test checks actual scenery positions through a year of
+animation, phase-wrap continuity, and control hit testing, including retaining
+the previous layout when presentation is deferred. It checks that switching
+birds reuses the prebuilt meshes and shows only the selected bird's name and
+caption, and that all five controls are at least 48 dp, disjoint, inside the
+safe area, and hit-tested correctly in compact, portrait, and landscape layouts
+at densities from 1 to 4.
+
+The runtime fault test runs the real worker and scene with a simulated GPU
+boundary: it checks delayed rotation and resizing with no subsequent callback or
+input, zero-sized surface recovery, visible/hidden Activity transitions, surface
 recreation, idle query errors, and visible button hit targets. It also checks
-transient retries and redraw timeout/cleanup when no vsync callbacks arrive.
-Subprocess checks verify bounded snapshots, detachment and shutdown with a stalled worker or GPU
-destructor. State tests cover round trips and rejected or malformed records.
-Gesture tests exercise real motion-event handling with synthetic Android pointers,
-including reordered indices, extra fingers, near-zero spans, cancellation,
-single-finger taps after pinching, and chronological processing of batched motion.
-The real-worker tests check batched excursions that return inside a Reset button,
-valid batched jitter, and 60 Hz clock updates after days of saved animation time,
-including simulated displays that draw every refresh with a fast GPU, keep doing
-so while Android runs a 120 Hz display at 60 Hz for two seconds, settle on every
-other refresh when the GPU is too slow, return to every refresh once it is fast
-enough, settle on every third refresh for a slower GPU while Choreographer calls
-back on only every other vsync, keep every refresh for a GPU that starts slowly
-and slows down further at lower rates, keep 60 fps when occasional frames cost
-more than average, and keep 120 fps while a GPU warms up.
-Application tests cover zoom limits, paused zooming, accidental-tap prevention,
-and zoom restoration across recreation. They also check touch and keyboard bird
-selection while paused, selection restoration, matching captions, and usable
-selector hit regions across compact, portrait, and landscape layouts.
-GPU tests exercise portrait and landscape offscreen targets, preparation boundaries, quality changes,
-readback, both bird workloads, switching birds at a frozen timestamp, camera zoom
-at both limits, and fixed-quality animation with
-the changing UI excluded. Fixed-camera captures also check shader-driven motion
-at large timestamps and across phase wraps.
-The presentation test uses real GPU commands with a simulated display boundary
-to exercise delayed window-size reports, capabilities cached until presentation,
-all four rotations, transform-only changes,
+transient retries, deferred frames that recover with one wait and one frame, a
+resize during frame layout, and redraw timeout/cleanup when no vsync callbacks
+arrive. Subprocess checks verify that, with a stalled worker or GPU destructor,
+a snapshot fails with a timeout and detachment and shutdown abort the process,
+each within 2.5 to 5 seconds. The test also checks batched excursions that
+return inside a Reset button, valid batched jitter, and the animation clock in
+eleven ten-second runs of simulated vsync and display timing: at 60 Hz after
+days of saved animation time; drawing every refresh with a fast GPU; keeping
+that while Android runs a 120 Hz display at 60 Hz for two seconds; settling on
+every other refresh when the GPU is too slow; returning to every refresh once it
+is fast enough; settling on every third refresh for a slower GPU while
+Choreographer calls back on only every other vsync; returning to and keeping
+every refresh for a GPU that starts slowly and whose clock falls further at
+lower rates; keeping 60 fps when occasional frames cost more than average; and
+keeping 120 fps while GPU time settles from a slow start. Each run checks that
+requested presentation times end on an exact grid of refreshes, and that
+animation time advances ten seconds within 70 ms, keeps sub-frame precision when
+saved, and stays still while paused.
+
+State tests cover round trips and rejected or malformed records. Gesture tests
+exercise real motion-event handling with synthetic Android pointers, including
+reordered indices, extra fingers, near-zero spans, cancellation, single-finger
+taps after pinching, and chronological processing of batched motion.
+
+The renderer test runs `gpu_probe` with `--exercise` on portrait and landscape
+offscreen targets: preparation boundaries, High/Ultra/High changes, readback,
+opaque output under the UI, the exact MSAA, particle, and triangle workload of
+both birds, switching birds at a frozen timestamp, camera zoom at both limits,
+identical images for equal timestamps, and fixed-quality animation with the
+changing UI excluded. Fixed-camera captures also check shader-driven motion at
+large timestamps and across phase wraps. The presentation test uses real GPU
+commands with a simulated display boundary to exercise delayed window-size
+reports, capabilities cached until presentation, all four rotations,
+transform-only changes, stable suboptimal results that keep the swapchain,
 resizes during acquisition/presentation, zero extents, idle geometry queries,
-transient swapchain failures, requested presentation times, late-frame reports
-that ignore a steady delay, and presentation-fence retirement.
+transient swapchain failures, reported presentation allocation failures,
+requested presentation times, late-frame reports that ignore a steady delay, a
+deadline on every GPU wait, presentation-fence retirement, and rejection of
+drivers without surface maintenance.
 
 Enable Khronos API and synchronization validation for the GPU tests:
 
 ```sh
 bazel test //native_buttons:renderer_test //native_buttons:presentation_test \
-    --platforms=//:arm64-v8a --define=vulkan_validation=true \
-    --run_under=//tools:vulkan_validation_runner
+    --config=vulkan_validation
 ```
 
-The optional runner downloads the pinned Android validation layer through Bazel.
-Its Android layer-path bootstrap and validation callbacks are compiled only with
-that flag; neither they nor the validation library are included in the normal APK.
+Any validation error fails the test; warnings are printed.
+`--config=vulkan_validation` defines `vulkan_validation=true` and runs the tests
+under `//tools:vulkan_validation_runner`, which copies the pinned Khronos
+Android validation layer, fetched by Bazel, beside the executable. The tests'
+layer-path bootstrap and the renderer's validation callbacks are compiled only
+with that config; the normal APK includes neither them nor the layer.
 
 These tests do not verify Android's compositor or the real Activity window.
 After installation, check portrait, landscape and reverse landscape, touch and
@@ -262,23 +318,23 @@ adb shell am start -n dev.demo.nativebuttons/android.app.NativeActivity
 ```
 
 For a ten-second MP4 export, the probe can stream 300 GPU-rendered RGBA frames
-at 720x1600 and 30 FPS into FFmpeg:
+of the High-detail flamingo at 720x1600, 2 px per dp, from an animation time of
+2 s, at 30 FPS into FFmpeg:
 
 ```sh
-bazel run //native_buttons:gpu_probe --platforms=//:arm64-v8a \
-    --run_under=//tools:android_test_runner -- --video | \
+bazel run //native_buttons:gpu_probe -- --video | \
     ffmpeg -f rawvideo -pixel_format rgba -video_size 720x1600 -framerate 30 \
         -i pipe:0 -an -c:v libx264 -preset veryfast -crf 20 \
         -pix_fmt yuv420p -threads 2 -movflags +faststart /tmp/native-buttons-10s.mp4
 ```
 
 This exports a fresh instance of the app's scene with a zero counter on the
-local GPU. It does not capture the running Activity or Android's system UI.
+local GPU; its FPS readout shows the export's render rate. It does not capture
+the running Activity or Android's system UI.
 
 Signing uses the debug key bundled with `rules_android`, so no local key or
-preparation script is needed. This certificate differs from the previous
-local demo key: Android cannot install it as an update over that older APK.
-Uninstalling the older app removes its saved count.
+preparation script is needed. The APK carries an APK Signature Scheme v3
+signature, with the v4 `.idsig` beside it.
 
 ## Historical Vulkan migration measurements
 
@@ -333,9 +389,10 @@ am start --user 0 -W -a android.intent.action.INSTALL_PACKAGE \
     -p com.google.android.packageinstaller
 ```
 
-Termux needs `allow-external-apps = true` in `~/.termux/termux.properties`
-while sharing the APK; reload Termux settings after changing it and restore
-the original setting after installation. Android may also require allowing
+Termux needs `allow-external-apps = true` in
+`/data/data/com.termux/files/home/.termux/termux.properties` while sharing the
+APK; run `termux-reload-settings` after changing it and restore the original
+setting after installation. Android may also require allowing
 Termux to install unknown apps and tapping Install. The `chmod` handles
 Android 14+'s read-only requirement for dynamically loaded DEX files under
 PRoot.

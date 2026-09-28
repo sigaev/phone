@@ -9,20 +9,60 @@ build --loading_phase_threads=2
 # downloaded by Bazel with pinned checksums and declared as action inputs.
 build --spawn_strategy=local
 
-# The APK targets Android ARM64.
+# Apps, tests, and tools all target Android ARM64. All C++ code for it uses
+# C++23 without exceptions, RTTI, or unwind tables, and exports only marked
+# symbols.
+build --platforms=//:arm64-v8a
 build --android_platforms=//:arm64-v8a
 build --copt=-march=armv9-a
+build --copt=-fvisibility=hidden
+build --copt=-fno-unwind-tables
+build --copt=-fno-asynchronous-unwind-tables
+build --cxxopt=-std=c++23
+build --cxxopt=-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS
+build --cxxopt=-fvisibility-global-new-delete-hidden
+build --cxxopt=-fno-exceptions
+build --cxxopt=-fno-rtti
+
+# Full link-time optimization inlines and discards code across libraries,
+# optimizing the apps, the shared renderer, and the libc++ runtime as one module.
+build --copt=-flto
+build --linkopt=-flto
+
+# Android links the libraries every app uses and rejects undefined symbols.
+build --linkopt=-landroid
+build --linkopt=-llog
+build --linkopt=-lm
+build --linkopt=-Wl,--no-undefined
+build --linkopt=-Wl,-z,start-stop-visibility=hidden
+
+# Support devices with 16 KiB memory pages.
+build --linkopt=-Wl,-z,max-page-size=16384
+build --linkopt=-Wl,-z,common-page-size=16384
+
+# Tests and tools run on this phone through //tools:android_test_runner, which
+# gives them a real /data path so the Vulkan loader can reach the GPU driver.
+# --config=vulkan_validation also enables Khronos validation in the renderer
+# and loads the validation layer.
+build --run_under=//tools:android_test_runner
+build:vulkan_validation --define=vulkan_validation=true
+build:vulkan_validation --run_under=//tools:vulkan_validation_runner
 
 # Every app requires API 36, which verifies APK Signature Scheme v3, so omit v1
 # and v2. Bazel's v4 method signs the APK with v3 and writes a v4 .idsig beside it.
 build --apk_signing_method=v4
 
-# Always build optimized binaries.
+# Always build optimized binaries. android_binary's native link does not honor
+# --strip=always completely, so the linker also strips all symbols.
 build -c opt
 build --strip=always
+build --linkopt=-Wl,--strip-all
 
-# Android links the exception-free libc++ runtime declared in //common:support.
+# Android links the exception-free libc++ runtime declared in //common:support
+# instead of the NDK's prebuilt C++ runtime and unwinder.
 build --features=-static_link_cpp_runtimes
+build --linkopt=-nostdlib++
+build --linkopt=--unwindlib=none
 
 # rules_android's build-time Java tools require Java 17.
 build --java_language_version=17

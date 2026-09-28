@@ -48,15 +48,16 @@ constexpr int64_t kCostMargin = 2000000, kLeadStep = 2000000, kLeadDecay = 20000
 // Down to 15 fps at 120 Hz.
 constexpr unsigned kMaximumInterval = 8;
 // N is the smallest interval whose budget, allowing kOverlap for the GPU
-// overlapping consecutive frames, fits the lowest frame cost measured since the
-// surface or detail level changed. Each change starts at the peak rate, where GPU
-// clocks run highest, and measures after kMeasureFrames, or up to twice as long
-// while the cost is still falling from the renderer's startup. kLateLimit missed
-// deadlines within kPacingWindow frames, once the lead is a full refresh, raise a
-// floor under N by one, so a few misses alone are tolerated. The floor relaxes by one after each
-// hold without misses. GPU clocks fall at slower rates, inflating the cost, so after a hold a
-// faster rate within kRetryFit of the cost is measured again. Slowing down within
-// kUnstable of speeding up doubles the hold.
+// overlapping consecutive frames, fits the frame cost. A new surface, detail
+// level, or peak rate starts at the peak rate, where GPU clocks run highest, and
+// measures after kMeasureFrames, or up to twice as long while the cost is still
+// falling from the renderer's startup; cheaper frames later lower the cost.
+// kLateLimit missed deadlines within kPacingWindow frames, once the lead is a
+// full refresh, set a floor one above N, so a few misses alone are tolerated.
+// After a hold since N rose to it, the floor steps down each frame without
+// misses. GPU clocks fall at slower rates, inflating the cost, so after a hold
+// the next faster rate is measured again if the cost exceeds its budget by at
+// most kRetryFit. Slowing down within kUnstable of speeding up doubles the hold.
 constexpr float kOverlap = 1.2f, kRetryFit = 1.25f;
 constexpr unsigned kPacingWindow = 120, kLateLimit = 4, kMeasureFrames = 30;
 constexpr int64_t kFirstHold = 1000000000, kLastHold = 32000000000, kUnstable = 5000000000;
