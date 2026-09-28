@@ -78,11 +78,12 @@ the workspace root:
 bazel build //sudoku
 ```
 
-Output: `bazel-bin/sudoku/sudoku.apk`, about 70 KB. The application ID is
+Output: `bazel-bin/sudoku/sudoku.apk`, about 66 KB. The application ID is
 `dev.demo.sudoku`; minimum Android API is 26 and target API is 35. The native
 library uses the same flags as `native_buttons`: the exception-free libc++
-runtime from `//common:support`, no unwind tables, full stripping, and 16 KiB
-segment alignment. It exports only `ANativeActivity_onCreate`.
+runtime from `//common:support`, link-time optimization, no unwind tables, full
+stripping, and 16 KiB segment alignment. It exports only
+`ANativeActivity_onCreate`.
 
 Run the tests on the phone:
 

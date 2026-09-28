@@ -13,7 +13,8 @@ infrastructure stay outside app directories:
 - `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform.
 - `MODULE.bazel`, `.bazelrc`, and `tools/` configure the toolchains.
 - `tools/android.bzl` exports `ANDROID_COPTS` and `ANDROID_LINKOPTS`
-  for native apps to share C++23 compiler settings and Android linker flags.
+  for native apps to share C++23 compiler settings and Android linker flags,
+  including full link-time optimization across all native libraries.
 - The NDK's Vulkan headers predate 1.4, so Khronos's Vulkan-Headers come from
   the Bazel Central Registry's `vulkan_headers` module.
 - stb is fetched by Bazel from a pinned upstream commit, verified by SHA-256,
@@ -35,6 +36,8 @@ The APKs are `bazel-bin/native_buttons/native_buttons.apk` and
 `bazel-bin/sudoku/sudoku.apk`. Bazel compiles, links,
 packages, aligns, and signs it, including on a fresh checkout. There are no
 build wrapper scripts, project `genrule` targets, or manually generated keys.
+Both apps require API 26, which never checks v1 JAR signatures, so `.bazelrc`
+omits them; the APKs carry APK Signature Scheme v2 and v3 signatures.
 
 `//common:support` selects this libc++ runtime for Android. The build disables
 the NDK's prebuilt C++ runtime and unwinder. `tools/no_unwind.ld` discards leftover

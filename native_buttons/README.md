@@ -115,7 +115,8 @@ Output: `bazel-bin/native_buttons/native_buttons.apk`.
 the worker runtime, storage, scene, and shared renderer. `alwayslink`
 preserves the dynamically discovered `ANativeActivity_onCreate` entry point.
 Compiler and linker flags come from `//tools:android.bzl`, including
-C++23, full symbol stripping, and 16 KiB ELF segment alignment. Vulkan GLSL lives
+C++23, link-time optimization across all native libraries, full symbol
+stripping, and 16 KiB ELF segment alignment. Vulkan GLSL lives
 in `shaders/` and `//common/gpu/shaders`; Bazel compiles and validates SPIR-V 1.6 with
 the pinned NDK shader tools and embeds it in the native library. Android's API 26
 stub library exports only Vulkan 1.0 commands, so the renderer loads the newer

@@ -9,6 +9,8 @@ ANDROID_COPTS = [
     "-fno-rtti",
     "-fno-unwind-tables",
     "-fno-asynchronous-unwind-tables",
+    # Full link-time optimization inlines and discards code across libraries.
+    "-flto",
 ]
 
 ANDROID_LINKOPTS = [
@@ -25,6 +27,8 @@ ANDROID_LINKOPTS = [
     # Support devices with 16 KiB memory pages.
     "-Wl,-z,max-page-size=16384",
     "-Wl,-z,common-page-size=16384",
+    # Optimize the -flto bitcode from ANDROID_COPTS as one module.
+    "-flto",
 ]
 
 def _android_test_runner_impl(ctx):
