@@ -1,4 +1,3 @@
-#include <android/api-level.h>
 #include <android/choreographer.h>
 #include <android/configuration.h>
 #include <android/input.h>
@@ -123,7 +122,7 @@ void call_void(JNIEnv* env, jobject object, const char* name, const char* signat
   if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
-// Dark system-bar icons over the white game; Android 15 draws edge to edge.
+// Dark system-bar icons over the white game, which Android draws edge to edge.
 void style_system_bars(ANativeActivity* activity) {
   JNIEnv* env = activity->env;
   if (env->PushLocalFrame(8) != 0) {
@@ -131,22 +130,10 @@ void style_system_bars(ANativeActivity* activity) {
     return;
   }
   jobject window = call_object(env, activity->clazz, "getWindow", "()Landroid/view/Window;");
-  call_void(env, window, "setStatusBarColor", "(I)V", -1);
-  call_void(env, window, "setNavigationBarColor", "(I)V", -1);
-  if (android_get_device_api_level() >= 30) {
-    jobject controller =
-        call_object(env, window, "getInsetsController", "()Landroid/view/WindowInsetsController;");
-    constexpr int kLightBars = 8 | 16;
-    call_void(env, controller, "setSystemBarsAppearance", "(II)V", kLightBars, kLightBars);
-  } else {
-    jobject decor = call_object(env, window, "getDecorView", "()Landroid/view/View;");
-    bool ok = true;
-    int flags = call_int(env, decor, "getSystemUiVisibility", ok);
-    constexpr int kLightStatusBar = 0x2000, kLightNavigationBar = 0x10;
-    if (ok)
-      call_void(env, decor, "setSystemUiVisibility", "(I)V",
-                flags | kLightStatusBar | kLightNavigationBar);
-  }
+  jobject controller =
+      call_object(env, window, "getInsetsController", "()Landroid/view/WindowInsetsController;");
+  constexpr int kLightBars = 8 | 16;
+  call_void(env, controller, "setSystemBarsAppearance", "(II)V", kLightBars, kLightBars);
   env->PopLocalFrame(nullptr);
 }
 
@@ -156,8 +143,8 @@ bool thrown(JNIEnv* env) {
   return true;
 }
 
-// Insets from the decor view's root WindowInsets on Android 11 and later.
-bool modern_insets(JNIEnv* env, jobject insets, int (&sides)[4]) {
+// System bar and display cutout insets from the decor view's root WindowInsets.
+bool read_insets(JNIEnv* env, jobject insets, int (&sides)[4]) {
   jclass types = env->FindClass("android/view/WindowInsets$Type");
   if (thrown(env) || !types) return false;
   jmethodID bars = env->GetStaticMethodID(types, "systemBars", "()I");
@@ -183,24 +170,6 @@ bool modern_insets(JNIEnv* env, jobject insets, int (&sides)[4]) {
   return true;
 }
 
-// System window insets and, from Android 9, cutouts on older releases.
-bool legacy_insets(JNIEnv* env, jobject insets, int (&sides)[4]) {
-  bool ok = true;
-  const char* names[] = {"getSystemWindowInsetLeft", "getSystemWindowInsetTop",
-                         "getSystemWindowInsetRight", "getSystemWindowInsetBottom"};
-  for (int i = 0; i < 4; ++i) sides[i] = call_int(env, insets, names[i], ok);
-  if (!ok || android_get_device_api_level() < 28) return ok;
-  jobject cutout = call_object(env, insets, "getDisplayCutout", "()Landroid/view/DisplayCutout;");
-  const char* safe[] = {"getSafeInsetLeft", "getSafeInsetTop", "getSafeInsetRight",
-                        "getSafeInsetBottom"};
-  bool known = cutout != nullptr;
-  int values[4];
-  for (int i = 0; i < 4 && known; ++i) values[i] = call_int(env, cutout, safe[i], known);
-  if (known)
-    for (int i = 0; i < 4; ++i) sides[i] = std::max(sides[i], values[i]);
-  return true;
-}
-
 // The window area outside system bars and cutouts, or an empty rectangle if unknown.
 gpu::Rect query_insets(ANativeActivity* activity) {
   JNIEnv* env = activity->env;
@@ -214,9 +183,7 @@ gpu::Rect query_insets(ANativeActivity* activity) {
   bool ok = insets != nullptr;
   int width = call_int(env, decor, "getWidth", ok), height = call_int(env, decor, "getHeight", ok);
   int sides[4] = {};
-  if (ok)
-    ok = android_get_device_api_level() >= 30 ? modern_insets(env, insets, sides)
-                                              : legacy_insets(env, insets, sides);
+  if (ok) ok = read_insets(env, insets, sides);
   env->PopLocalFrame(nullptr);
   int horizontal = sides[0] + sides[2], vertical = sides[1] + sides[3];
   if (!ok || width <= horizontal || height <= vertical) return {};
@@ -270,12 +237,12 @@ void configure_input(Activity& a) {
   set_touch_slop(*a.app, slop > 0 ? float(slop) : 8 * scale);
 }
 
-void on_frame(long, void* data);
+void on_frame(int64_t, void* data);
 
 void schedule(Activity& a) {
   if (a.frame_pending || a.destroyed || !a.choreographer) return;
   a.frame_pending = true;
-  AChoreographer_postFrameCallback(a.choreographer, on_frame, &a);
+  AChoreographer_postFrameCallback64(a.choreographer, on_frame, &a);
 }
 
 // Show persistence problems and draw any change on the next vsync.
@@ -285,7 +252,7 @@ void settle(Activity& a) {
   if (update(*a.app, monotonic())) schedule(a);
 }
 
-void on_frame(long, void* data) {
+void on_frame(int64_t, void* data) {
   auto* a = static_cast<Activity*>(data);
   a->frame_pending = false;
   if (a->destroyed) {

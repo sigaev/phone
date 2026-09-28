@@ -36,8 +36,10 @@ The APKs are `bazel-bin/native_buttons/native_buttons.apk` and
 `bazel-bin/sudoku/sudoku.apk`. Bazel compiles, links,
 packages, aligns, and signs it, including on a fresh checkout. There are no
 build wrapper scripts, project `genrule` targets, or manually generated keys.
-Both apps require API 26, which never checks v1 JAR signatures, so `.bazelrc`
-omits them; the APKs carry APK Signature Scheme v2 and v3 signatures.
+Both apps require Android 16 (API 36), the ARMv9-A CPU of this phone, a Pixel 8
+Pro, and its Vulkan 1.4 GPU; there are no code paths for older releases or
+hardware. API 36 verifies APK Signature Scheme v3, so `.bazelrc` omits v1 and v2
+signatures. Its `v4` signing method also writes a v4 `.idsig` beside each APK.
 
 `//common:support` selects this libc++ runtime for Android. The build disables
 the NDK's prebuilt C++ runtime and unwinder. `tools/no_unwind.ld` discards leftover
@@ -70,11 +72,13 @@ builds reuse Bazel's cache.
 `MODULE.bazel` uses `hermetic_android_toolchains` 0.4.0 from Bazel Central
 Registry with pinned, checksum-verified ARM64 archives:
 
-- Android SDK Custom release 35.0.2 (containing Build Tools 35.0.0), built for
+- Android SDK Custom release 37.0.0 (containing Build Tools 37.0.0), built for
   `aarch64-linux-musl` by HomuHomu833.
 - Android NDK Custom r29, built for `aarch64-linux-musl` by the same project,
-  targeting Android API 26.
-- Google's Android SDK platform 35, revision 2.
+  targeting its newest sysroot, Android API 35. Google's r30 has no ARM64 Linux
+  host build, and this project offers only an r30 beta.
+- Google's Android SDK platform 37.2, revision 1. The apps compile against it
+  and target API 36.
 
 The community builds replace Google's x86-64 host binaries. The patch in
 `tools/patches/` adapts the upstream Bazel module's Linux host
@@ -108,7 +112,7 @@ put the version-specific settings required by the toolchain in the ignored
 `.bazelrc.local` file:
 
 ```text
-common --repo_env=ACCEPTED_ANDROID_SDK_LICENSE_VERSION=35
+common --repo_env=ACCEPTED_ANDROID_SDK_LICENSE_VERSION=37.2
 common --repo_env=ACCEPTED_ANDROID_NDK_LICENSE_VERSION=r29
 ```
 
@@ -122,5 +126,5 @@ inside APKs. `MODULE.bazel.lock` is excluded from Git.
 - [Bazel Android NDK rules](https://github.com/bazelbuild/rules_android_ndk/tree/v0.1.5)
 - [Android page sizes](https://developer.android.com/guide/practices/page-sizes)
 - [stb_truetype](https://github.com/nothings/stb/blob/master/stb_truetype.h)
-- [ARM64 SDK archives](https://github.com/HomuHomu833/android-sdk-custom/releases/tag/35.0.2)
+- [ARM64 SDK archives](https://github.com/HomuHomu833/android-sdk-custom/releases/tag/37.0.0)
 - [ARM64 NDK archives](https://github.com/HomuHomu833/android-ndk-custom/releases/tag/r29)

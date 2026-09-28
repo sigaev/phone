@@ -66,7 +66,7 @@ std::uint64_t geometry(int width, int height) {
 struct FrameClock {
   int fd;
   unsigned remaining = 600, delivered = 0;
-  AChoreographer_frameCallback callback = nullptr;
+  AChoreographer_frameCallback64 callback = nullptr;
   void* data = nullptr;
   std::atomic<bool> finished{false};
 };
@@ -196,7 +196,7 @@ common::Result<void> wait_frame(Renderer&) {
 }
 
 RenderStats get_stats(const Renderer& r) {
-  return {r.width, r.height, r.width, r.height, 4, 16384, 0, 0, false};
+  return {r.width, r.height, r.width, r.height, 4, 16384, 0, 0};
 }
 
 std::string_view get_device(const Renderer&) { return "runtime-fault-test"; }
@@ -204,9 +204,9 @@ std::string_view get_device(const Renderer&) { return "runtime-fault-test"; }
 
 // Simulate a display which stops delivering vsync. A required redraw must
 // recover or fail without depending on another Choreographer callback.
-extern "C" void __wrap_AChoreographer_postFrameCallback(AChoreographer*,
-                                                        AChoreographer_frameCallback callback,
-                                                        void* data) {
+extern "C" void __wrap_AChoreographer_postFrameCallback64(AChoreographer*,
+                                                          AChoreographer_frameCallback64 callback,
+                                                          void* data) {
   ++callbacks;
   if (frame_clock && frame_clock->remaining) {
     frame_clock->callback = callback;

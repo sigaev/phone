@@ -1,6 +1,5 @@
 #include "native_buttons/state.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -22,15 +21,6 @@ struct StateRecord {
 
 static_assert(sizeof(StateRecord) == sizeof(SavedState));
 static_assert(offsetof(StateRecord, time) == 24);
-
-struct LegacyRecord {
-  std::uint32_t magic, version;
-  std::int32_t count;
-  std::uint32_t flags;
-  float yaw, time, zoom;
-};
-
-static_assert(sizeof(LegacyRecord) == 28);
 }
 
 SavedState encode_state(const SessionState& state) {
@@ -45,29 +35,12 @@ SavedState encode_state(const SessionState& state) {
 }
 
 common::Result<SessionState> decode_state(std::span<const std::byte> bytes) {
-  // Accept the count-only format saved by previous versions of the app.
-  if (bytes.size() == sizeof(std::int32_t)) {
-    std::int32_t count;
-    std::memcpy(&count, bytes.data(), sizeof(count));
-    return SessionState{.count = std::clamp(int(count), 0, 999999), .bird = Bird::kPelican};
-  }
-  bool legacy = bytes.size() == 24 || bytes.size() == sizeof(LegacyRecord);
-  if (!legacy && bytes.size() != sizeof(StateRecord))
+  if (bytes.size() != sizeof(StateRecord))
     return std::unexpected(common::Error{"Invalid Activity state size"});
-  StateRecord record{};
-  if (legacy) {
-    LegacyRecord previous{.zoom = 1};
-    std::memcpy(&previous, bytes.data(), bytes.size());
-    if (previous.version != (bytes.size() == 24 ? 1u : 2u))
-      return std::unexpected(common::Error{"Invalid or unsupported Activity state"});
-    record = {previous.magic, 3, previous.count, previous.flags, previous.yaw, previous.zoom,
-              previous.time};
-  } else {
-    std::memcpy(&record, bytes.data(), bytes.size());
-  }
-  if (record.magic != kMagic || (record.version != 3 && record.version != kVersion) ||
-      record.count < 0 || record.count > 999999 ||
-      (record.flags & ~(record.version == kVersion ? 7u : 3u)) || !std::isfinite(record.yaw) ||
+  StateRecord record;
+  std::memcpy(&record, bytes.data(), bytes.size());
+  if (record.magic != kMagic || record.version != kVersion || record.count < 0 ||
+      record.count > 999999 || (record.flags & ~7u) || !std::isfinite(record.yaw) ||
       !std::isfinite(record.time) || record.time < 0 || !std::isfinite(record.zoom) ||
       record.zoom < kMinimumZoom || record.zoom > kMaximumZoom)
     return std::unexpected(common::Error{"Invalid or unsupported Activity state"});

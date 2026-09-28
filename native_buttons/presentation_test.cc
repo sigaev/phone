@@ -121,13 +121,6 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPhysicalDeviceSurfaceSupportKHR(VkPhy
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPhysicalDeviceSurfaceFormatsKHR(
-    VkPhysicalDevice, VkSurfaceKHR, unsigned* count, VkSurfaceFormatKHR* formats) {
-  if (formats) formats[0] = {VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
-  *count = 1;
-  return VK_SUCCESS;
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     VkPhysicalDevice, VkSurfaceKHR, VkSurfaceCapabilitiesKHR* capabilities) {
   if (capabilities_result != VK_SUCCESS) return capabilities_result;

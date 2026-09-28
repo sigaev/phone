@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.demo.sudoku" android:versionCode="1" android:versionName="1.0">
-    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <uses-sdk android:minSdkVersion="36" android:targetSdkVersion="36" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00404000" android:required="true" />
     <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="true" />
     <application android:label="Sudoku" android:hasCode="false"
         android:allowBackup="false" android:extractNativeLibs="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <!-- Back closes dialogs as a key event. Without Java code the app cannot
+             register a predictive-back callback, which would replace that event. -->
         <activity android:name="android.app.NativeActivity" android:exported="true"
+            android:enableOnBackInvokedCallback="false"
             android:screenOrientation="fullUser"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|density|uiMode">
             <!-- android_binary links native deps as lib<target-name>.so. -->

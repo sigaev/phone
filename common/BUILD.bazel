@@ -9,7 +9,7 @@ cc_test(
     copts = ANDROID_COPTS + ["-fno-assume-sane-operator-new"],
     linkopts = [
         "-Wl,--wrap=malloc",
-        "-Wl,--wrap=posix_memalign",
+        "-Wl,--wrap=aligned_alloc",
     ],
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],

@@ -16,7 +16,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
-#include <limits>
 #include <new>
 #include <vector>
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -50,8 +49,12 @@ constexpr int kFontPadding = 16;
 constexpr int kAtlasReserved = 4;
 constexpr unsigned kFrameCount = 2;
 constexpr VkFormat kHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+// Android swapchains always offer this format with sRGB nonlinear color.
+constexpr VkFormat kOutputFormat = VK_FORMAT_R8G8B8A8_UNORM;
+// This phone's GPU renders X8_D24 at 4x and filters it for shadows. Without a
+// stencil aspect, dynamic rendering has no stencil contents to preserve.
+constexpr VkFormat kDepthFormat = VK_FORMAT_X8_D24_UNORM_PACK32;
 constexpr VkSampleCountFlagBits kSamples = VK_SAMPLE_COUNT_4_BIT;
-constexpr std::uint64_t kWaitForever = std::numeric_limits<std::uint64_t>::max();
 constexpr std::uint64_t kFrameTimeout = 1000000000;
 constexpr std::uint32_t kFullVertex[] =
 #include "common/gpu/full_vert.inc"
@@ -160,14 +163,6 @@ struct SurfaceImage {
   bool present_pending = false;
 };
 
-// Android's API 26 stub library exports only Vulkan 1.0; the driver supplies newer commands.
-struct Commands {
-  PFN_vkCmdBeginRendering begin_rendering = nullptr;
-  PFN_vkCmdEndRendering end_rendering = nullptr;
-  PFN_vkCmdPipelineBarrier2 pipeline_barrier = nullptr;
-  PFN_vkCmdPushDescriptorSet push_descriptor_set = nullptr;
-  PFN_vkQueueSubmit2 queue_submit = nullptr;
-};
 }
 
 struct Renderer {
@@ -180,18 +175,16 @@ struct Renderer {
   VkPhysicalDeviceMemoryProperties memory{};
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
-  Commands vk;
-  unsigned queue_family = 0, timestamp_bits = 0;
+  // NDK r29's newest stub library, API 35, predates this Vulkan 1.4 command.
+  PFN_vkCmdPushDescriptorSet push_descriptor_set = nullptr;
+  unsigned queue_family = 0;
   VkSurfaceKHR surface = VK_NULL_HANDLE;
   VkSwapchainKHR swapchain = VK_NULL_HANDLE;
   ANativeWindow* window = nullptr;
-  VkFormat output_format = VK_FORMAT_R8G8B8A8_UNORM, depth_format = VK_FORMAT_X8_D24_UNORM_PACK32;
-  VkColorSpaceKHR color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
   VkSurfaceTransformFlagBitsKHR surface_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
   VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE, shadow_sampler = VK_NULL_HANDLE;
-  VkFilter shadow_filter = VK_FILTER_NEAREST;
   VkPipeline mesh_pipeline = VK_NULL_HANDLE, shadow_pipeline = VK_NULL_HANDLE,
              sky_pipeline = VK_NULL_HANDLE, particle_pipeline = VK_NULL_HANDLE,
              compute_pipeline = VK_NULL_HANDLE, blur_pipeline = VK_NULL_HANDLE,
@@ -290,7 +283,7 @@ Result<Owner<Image>> create_image(Renderer& r, int width, int height, VkFormat f
   image->device = r.device;
   image->extent = {static_cast<unsigned>(width), static_cast<unsigned>(height)};
   image->levels = levels;
-  if (format == r.depth_format) image->aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+  if (format == kDepthFormat) image->aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
   VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   info.imageType = VK_IMAGE_TYPE_2D;
   info.format = format;
@@ -303,15 +296,13 @@ Result<Owner<Image>> create_image(Renderer& r, int width, int height, VkFormat f
   VK_CHECK(vkCreateImage(r.device, &info, nullptr, &image->handle));
   VkMemoryRequirements requirements;
   vkGetImageMemoryRequirements(r.device, image->handle, &requirements);
-  auto type = memory_type(r, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  // Transient attachments stay in tile memory without backing allocations.
+  auto type = memory_type(
+      r, requirements.memoryTypeBits,
+      usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT
+          ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT
+          : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if (!type) return std::unexpected(type.error());
-  if (usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT)
-    for (unsigned i = 0; i < r.memory.memoryTypeCount; ++i)
-      if ((requirements.memoryTypeBits & (1u << i)) &&
-          (r.memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) {
-        type = i;
-        break;
-      }
   VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   allocate.allocationSize = requirements.size;
   allocate.memoryTypeIndex = *type;
@@ -377,7 +368,7 @@ Result<void> submit(Renderer& r, Frame& frame, VkSemaphore acquired = VK_NULL_HA
   info.signalSemaphoreInfoCount = ready ? 1 : 0;
   info.pSignalSemaphoreInfos = &signal;
   VK_CHECK(vkResetFences(r.device, 1, &frame.fence));
-  VK_CHECK(r.vk.queue_submit(r.queue, 1, &info, frame.fence));
+  VK_CHECK(vkQueueSubmit2(r.queue, 1, &info, frame.fence));
   frame.in_flight = true;
   return {};
 }
@@ -450,7 +441,7 @@ void transition(Renderer& r, std::initializer_list<const Image*> images, VkImage
   VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
   dependency.imageMemoryBarrierCount = count;
   dependency.pImageMemoryBarriers = barriers.data();
-  r.vk.pipeline_barrier(r.frames[r.frame_index].command, &dependency);
+  vkCmdPipelineBarrier2(r.frames[r.frame_index].command, &dependency);
 }
 
 void memory_barrier(Renderer& r, Scope source, Scope destination) {
@@ -462,13 +453,7 @@ void memory_barrier(Renderer& r, Scope source, Scope destination) {
   VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
   dependency.memoryBarrierCount = 1;
   dependency.pMemoryBarriers = &barrier;
-  r.vk.pipeline_barrier(r.frames[r.frame_index].command, &dependency);
-}
-
-template <typename T>
-bool load(VkDevice device, T& command, const char* name) {
-  command = reinterpret_cast<T>(vkGetDeviceProcAddr(device, name));
-  return command != nullptr;
+  vkCmdPipelineBarrier2(r.frames[r.frame_index].command, &dependency);
 }
 
 Result<void> create_context(Renderer& r) {
@@ -543,7 +528,6 @@ Result<void> create_context(Renderer& r) {
       if (!present) continue;
       r.physical = physical;
       r.queue_family = i;
-      r.timestamp_bits = families[i].timestampValidBits;
       r.properties = properties;
       break;
     }
@@ -551,32 +535,6 @@ Result<void> create_context(Renderer& r) {
   }
   if (!r.physical) return fail("A hardware Vulkan 1.4 graphics/compute device is required");
   vkGetPhysicalDeviceMemoryProperties(r.physical, &r.memory);
-  // Without a stencil aspect, dynamic rendering has no stencil contents to preserve.
-  bool depth_found = r.overlay;
-  for (auto format : {VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM}) {
-    if (r.overlay) break;
-    VkImageFormatProperties attachment{}, shadow{};
-    auto attachment_result = vkGetPhysicalDeviceImageFormatProperties(
-        r.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, 0,
-        &attachment);
-    auto shadow_result = vkGetPhysicalDeviceImageFormatProperties(
-        r.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, &shadow);
-    if (attachment_result != VK_SUCCESS || shadow_result != VK_SUCCESS ||
-        !(attachment.sampleCounts & kSamples) || !(shadow.sampleCounts & VK_SAMPLE_COUNT_1_BIT))
-      continue;
-    VkFormatProperties properties;
-    vkGetPhysicalDeviceFormatProperties(r.physical, format, &properties);
-    r.depth_format = format;
-    r.shadow_filter =
-        properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
-            ? VK_FILTER_LINEAR
-            : VK_FILTER_NEAREST;
-    depth_found = true;
-    break;
-  }
-  if (!depth_found) return fail("A sampled depth format with 4x attachment support is required");
   // Vulkan guarantees 4x multisampling, blending, and filtering for the HDR format.
   // Device creation reports any missing optional feature or extension.
   float priority = 1;
@@ -612,29 +570,9 @@ Result<void> create_context(Renderer& r) {
     return fail("The GPU lacks large points or swapchain presentation fences", created);
   VK_CHECK(created);
   vkGetDeviceQueue(r.device, r.queue_family, 0, &r.queue);
-  auto& vk = r.vk;
-  if (!load(r.device, vk.begin_rendering, "vkCmdBeginRendering") ||
-      !load(r.device, vk.end_rendering, "vkCmdEndRendering") ||
-      !load(r.device, vk.pipeline_barrier, "vkCmdPipelineBarrier2") ||
-      !load(r.device, vk.push_descriptor_set, "vkCmdPushDescriptorSet") ||
-      !load(r.device, vk.queue_submit, "vkQueueSubmit2"))
-    return fail("The Vulkan driver does not provide its 1.4 commands");
-  if (r.surface) {
-    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(r.physical, r.surface, &count, nullptr));
-    std::vector<VkSurfaceFormatKHR> formats(count);
-    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(r.physical, r.surface, &count, formats.data()));
-    bool found = false;
-    for (auto format : formats)
-      if ((format.format == VK_FORMAT_R8G8B8A8_UNORM ||
-           format.format == VK_FORMAT_B8G8R8A8_UNORM) &&
-          format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-        r.output_format = format.format;
-        r.color_space = format.colorSpace;
-        found = true;
-        break;
-      }
-    if (!found) return fail("An eight-bit UNORM Vulkan surface is required");
-  }
+  r.push_descriptor_set = reinterpret_cast<PFN_vkCmdPushDescriptorSet>(
+      vkGetDeviceProcAddr(r.device, "vkCmdPushDescriptorSet"));
+  if (!r.push_descriptor_set) return fail("The Vulkan driver does not provide its 1.4 commands");
   for (auto& frame : r.frames) {
     VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pool.queueFamilyIndex = r.queue_family;
@@ -650,12 +588,11 @@ Result<void> create_context(Renderer& r) {
     VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VK_CHECK(vkCreateSemaphore(r.device, &semaphore, nullptr, &frame.acquired));
   }
-  if (r.timestamp_bits && r.properties.limits.timestampComputeAndGraphics) {
-    VkQueryPoolCreateInfo queries{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-    queries.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    queries.queryCount = kFrameCount * 2;
-    VK_CHECK(vkCreateQueryPool(r.device, &queries, nullptr, &r.queries));
-  }
+  // This phone's graphics queue records 64-bit timestamps.
+  VkQueryPoolCreateInfo queries{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+  queries.queryType = VK_QUERY_TYPE_TIMESTAMP;
+  queries.queryCount = kFrameCount * 2;
+  VK_CHECK(vkCreateQueryPool(r.device, &queries, nullptr, &r.queries));
   __android_log_print(ANDROID_LOG_INFO, "native_buttons", "Vulkan %u.%u on %s",
                       VK_VERSION_MAJOR(r.properties.apiVersion),
                       VK_VERSION_MINOR(r.properties.apiVersion), r.properties.deviceName);
@@ -691,7 +628,6 @@ Result<void> create_layout(Renderer& r) {
   VK_CHECK(vkCreateSampler(r.device, &sampler, nullptr, &r.sampler));
   sampler.compareEnable = VK_TRUE;
   sampler.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-  sampler.magFilter = sampler.minFilter = r.shadow_filter;
   VK_CHECK(vkCreateSampler(r.device, &sampler, nullptr, &r.shadow_sampler));
   return {};
 }
@@ -795,11 +731,11 @@ Result<VkPipeline> create_pipeline(Renderer& r, std::span<const std::uint32_t> v
   dynamic.dynamicStateCount = 2;
   dynamic.pDynamicStates = dynamic_states;
   // Dynamic rendering declares attachment formats instead of render passes.
-  VkFormat color = hdr || kind == Pipeline::kBlur ? kHdrFormat : r.output_format;
+  VkFormat color = hdr || kind == Pipeline::kBlur ? kHdrFormat : kOutputFormat;
   VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
   rendering.colorAttachmentCount = shadow ? 0 : 1;
   rendering.pColorAttachmentFormats = &color;
-  if (shadow || hdr) rendering.depthAttachmentFormat = r.depth_format;
+  if (shadow || hdr) rendering.depthAttachmentFormat = kDepthFormat;
   VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
   info.pNext = &rendering;
   info.stageCount = fragment.empty() ? 1 : 2;
@@ -865,44 +801,22 @@ void destroy_targets(Renderer& r) {
   r.output.reset();
 }
 
-VkExtent2D surface_extent(const Renderer& r, const VkSurfaceCapabilitiesKHR& capabilities) {
-  if (capabilities.currentExtent.width != std::numeric_limits<unsigned>::max())
-    return capabilities.currentExtent;
-  int width = ANativeWindow_getWidth(r.window), height = ANativeWindow_getHeight(r.window);
-  if (width <= 0 || height <= 0) return {};
-  return {std::clamp<unsigned>(width, capabilities.minImageExtent.width,
-                               capabilities.maxImageExtent.width),
-          std::clamp<unsigned>(height, capabilities.minImageExtent.height,
-                               capabilities.maxImageExtent.height)};
-}
-
 Result<bool> create_swapchain(Renderer& r, const VkSurfaceCapabilitiesKHR& capabilities) {
   if (r.width <= 0 || r.height <= 0) return false;
-  if (!(capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
-    return fail("Vulkan surface cannot be rendered to");
   unsigned count = capabilities.minImageCount + 1;
   if (capabilities.maxImageCount) count = std::min(count, capabilities.maxImageCount);
   VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
   info.surface = r.surface;
   info.minImageCount = count;
-  info.imageFormat = r.output_format;
-  info.imageColorSpace = r.color_space;
+  info.imageFormat = kOutputFormat;
+  info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
   info.imageExtent = {static_cast<unsigned>(r.width), static_cast<unsigned>(r.height)};
   info.imageArrayLayers = 1;
   info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
   // Render in window coordinates. Android's compositor applies display rotation;
   // claiming currentTransform here would require rotating every output/UI vertex.
-  if (!(capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR))
-    return fail("The Vulkan surface does not support window-coordinate presentation");
   info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-  info.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-  for (auto alpha :
-       {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
-        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR})
-    if (capabilities.supportedCompositeAlpha & alpha) {
-      info.compositeAlpha = alpha;
-      break;
-    }
+  info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
   info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
   info.clipped = VK_TRUE;
   info.oldSwapchain = r.swapchain;
@@ -923,7 +837,7 @@ Result<bool> create_swapchain(Renderer& r, const VkSurfaceCapabilitiesKHR& capab
     image.target.device = r.device;
     image.target.handle = images[i];
     image.target.extent = info.imageExtent;
-    if (auto view = create_view(r, image.target, r.output_format); !view)
+    if (auto view = create_view(r, image.target, kOutputFormat); !view)
       return std::unexpected(view.error());
     VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VK_CHECK(vkCreateSemaphore(r.device, &semaphore, nullptr, &image.ready));
@@ -942,9 +856,8 @@ Result<bool> ensure_targets(Renderer& r, bool maximum) {
     // until presentation; prepare_frame also observes the independent native
     // window size so an idle resize can trigger the frame that refreshes it.
     VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r.physical, r.surface, &capabilities));
-    auto extent = surface_extent(r, capabilities);
-    width = extent.width;
-    height = extent.height;
+    width = capabilities.currentExtent.width;
+    height = capabilities.currentExtent.height;
   }
   if (width <= 0 || height <= 0) {
     if (r.window) {
@@ -989,16 +902,16 @@ Result<bool> ensure_targets(Renderer& r, bool maximum) {
   int bw = std::max(1, r.render_width / 4), bh = std::max(1, r.render_height / 4);
   // Overlay frames resolve their multisampled color directly into the output.
   const ImageSpec overlay_specs[] = {
-      {&r.ms_color, r.render_width, r.render_height, r.output_format,
+      {&r.ms_color, r.render_width, r.render_height, kOutputFormat,
        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | kTransient, kSamples},
   };
   const ImageSpec scene_specs[] = {
       {&r.hdr, r.render_width, r.render_height, kHdrFormat, kColorUsage, VK_SAMPLE_COUNT_1_BIT},
       {&r.ms_color, r.render_width, r.render_height, kHdrFormat,
        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | kTransient, kSamples},
-      {&r.ms_depth, r.render_width, r.render_height, r.depth_format, kDepthUsage | kTransient,
+      {&r.ms_depth, r.render_width, r.render_height, kDepthFormat, kDepthUsage | kTransient,
        kSamples},
-      {&r.shadow, r.shadow_size, r.shadow_size, r.depth_format,
+      {&r.shadow, r.shadow_size, r.shadow_size, kDepthFormat,
        kDepthUsage | VK_IMAGE_USAGE_SAMPLED_BIT, VK_SAMPLE_COUNT_1_BIT},
       {&r.bloom[0], bw, bh, kHdrFormat, kColorUsage, VK_SAMPLE_COUNT_1_BIT},
       {&r.bloom[1], bw, bh, kHdrFormat, kColorUsage, VK_SAMPLE_COUNT_1_BIT},
@@ -1012,7 +925,7 @@ Result<bool> ensure_targets(Renderer& r, bool maximum) {
   }
   if (!r.window) {
     auto image =
-        create_image(r, r.width, r.height, r.output_format,
+        create_image(r, r.width, r.height, kOutputFormat,
                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     if (!image) return std::unexpected(image.error());
     r.output = std::move(*image);
@@ -1023,12 +936,9 @@ Result<bool> ensure_targets(Renderer& r, bool maximum) {
 }
 
 Result<void> create_font(Renderer& renderer) {
-  const char* paths[] = {"/system/fonts/RobotoStatic-Regular.ttf",
-                         "/system/fonts/Roboto-Regular.ttf"};
+  // Roboto-Regular.ttf is a variable font; stb_truetype needs the static instance.
   std::vector<unsigned char> data;
-  for (const char* path : paths) {
-    FILE* f = std::fopen(path, "rb");
-    if (!f) continue;
+  if (FILE* f = std::fopen("/system/fonts/RobotoStatic-Regular.ttf", "rb")) {
     std::fseek(f, 0, SEEK_END);
     long n = std::ftell(f);
     std::rewind(f);
@@ -1037,7 +947,6 @@ Result<void> create_font(Renderer& renderer) {
       if (std::fread(data.data(), 1, n, f) != size_t(n)) data.clear();
     }
     std::fclose(f);
-    if (!data.empty()) break;
   }
   if (data.empty()) return fail("Cannot load the system font");
   size_t total = 0;
@@ -1175,13 +1084,12 @@ Result<void> create_geometry(Renderer& renderer) {
 
 void collect_timing(Renderer& r, unsigned index) {
   auto& frame = r.frames[index];
-  if (!r.queries || !frame.timed) return;
+  if (!frame.timed) return;
   std::uint64_t timestamps[2]{};
   if (vkGetQueryPoolResults(r.device, r.queries, index * 2, 2, sizeof(timestamps), timestamps,
                             sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
-    std::uint64_t mask = r.timestamp_bits == 64 ? kWaitForever : (1ull << r.timestamp_bits) - 1;
-    float elapsed = float((timestamps[1] - timestamps[0]) & mask) *
-                    r.properties.limits.timestampPeriod / 1000000.f;
+    float elapsed =
+        float(timestamps[1] - timestamps[0]) * r.properties.limits.timestampPeriod / 1000000.f;
     r.gpu_millis = r.gpu_millis == 0 ? elapsed : r.gpu_millis * .85f + elapsed * .15f;
   }
   frame.timed = false;
@@ -1224,7 +1132,7 @@ void begin_pass(Renderer& r, const Image* color, const Image* depth = nullptr,
     attachments[0].resolveImageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
   }
   auto command = r.frames[r.frame_index].command;
-  r.vk.begin_rendering(command, &info);
+  vkCmdBeginRendering(command, &info);
   VkViewport viewport{
       0, 0, float(info.renderArea.extent.width), float(info.renderArea.extent.height), 0, 1};
   vkCmdSetViewport(command, 0, 1, &viewport);
@@ -1232,7 +1140,7 @@ void begin_pass(Renderer& r, const Image* color, const Image* depth = nullptr,
 }
 
 void end_pass(Renderer& r, const Image& target, VkImageLayout layout) {
-  r.vk.end_rendering(r.frames[r.frame_index].command);
+  vkCmdEndRendering(r.frames[r.frame_index].command);
   transition(r, {&target}, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, layout);
 }
 
@@ -1256,8 +1164,8 @@ void bind(Renderer& r, VkPipeline pipeline,
     write.pImageInfo = &image;
   }
   if (count)
-    r.vk.push_descriptor_set(command, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeline_layout, 0, count,
-                             writes.data());
+    r.push_descriptor_set(command, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeline_layout, 0, count,
+                          writes.data());
 }
 
 void push(Renderer& r, Color parameters) {
@@ -1420,7 +1328,7 @@ Result<bool> surface_changed(const Renderer& r) {
   if (!r.window) return false;
   VkSurfaceCapabilitiesKHR capabilities;
   VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r.physical, r.surface, &capabilities));
-  auto extent = surface_extent(r, capabilities);
+  auto extent = capabilities.currentExtent;
   return int(extent.width) != r.window_width || int(extent.height) != r.window_height ||
          capabilities.currentTransform != r.surface_transform ||
          ANativeWindow_getWidth(r.window) != r.observed_window_width ||
@@ -1502,10 +1410,8 @@ Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximu
                   mesh.items.data(), mesh.items.size() * sizeof(Instance));
   if (auto result = begin_commands(r, frame); !result) return std::unexpected(result.error());
   auto command = frame.command;
-  if (r.queries) {
-    vkCmdResetQueryPool(command, r.queries, r.frame_index * 2, 2);
-    vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, r.queries, r.frame_index * 2);
-  }
+  vkCmdResetQueryPool(command, r.queries, r.frame_index * 2, 2);
+  vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, r.queries, r.frame_index * 2);
   // Every pipeline shares this layout, so the constants persist across the frame.
   vkCmdPushConstants(command, r.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(constants),
                      &constants);
@@ -1519,8 +1425,7 @@ Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximu
   write.descriptorCount = 1;
   write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
   write.pBufferInfo = &particles;
-  r.vk.push_descriptor_set(command, VK_PIPELINE_BIND_POINT_COMPUTE, r.pipeline_layout, 0, 1,
-                           &write);
+  r.push_descriptor_set(command, VK_PIPELINE_BIND_POINT_COMPUTE, r.pipeline_layout, 0, 1, &write);
   vkCmdDispatch(command, r.particle_count / 128, 1, 1);
   memory_barrier(
       r, {VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT},
@@ -1564,11 +1469,9 @@ Result<bool> render_overlay(Renderer& r, Color background) {
   Constants constants{};
   constants.size = {1, 0, float(r.width), float(r.height)};
   if (auto result = begin_commands(r, frame); !result) return std::unexpected(result.error());
-  if (r.queries) {
-    vkCmdResetQueryPool(frame.command, r.queries, r.frame_index * 2, 2);
-    vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, r.queries,
-                        r.frame_index * 2);
-  }
+  vkCmdResetQueryPool(frame.command, r.queries, r.frame_index * 2, 2);
+  vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, r.queries,
+                      r.frame_index * 2);
   vkCmdPushConstants(frame.command, r.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(constants),
                      &constants);
   // present() draws the UI and resolves the multisampled color into the output.
@@ -1591,9 +1494,8 @@ Result<bool> present(Renderer& r) {
   }
   end_pass(r, output(r),
            r.window ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-  if (r.queries)
-    vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, r.queries,
-                        r.frame_index * 2 + 1);
+  vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, r.queries,
+                      r.frame_index * 2 + 1);
   auto* image = r.window ? &r.surface_images[r.image_index] : nullptr;
   if (auto result = submit(r, frame, image ? frame.acquired : VK_NULL_HANDLE,
                            image ? image->ready : VK_NULL_HANDLE);
@@ -1782,8 +1684,7 @@ RenderStats get_stats(const Renderer& r) {
           static_cast<int>(kSamples),
           r.particle_count,
           r.triangle_count,
-          r.gpu_millis,
-          r.queries != VK_NULL_HANDLE};
+          r.gpu_millis};
 }
 
 std::string_view get_device(const Renderer& r) { return r.properties.deviceName; }

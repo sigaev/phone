@@ -67,20 +67,23 @@ use_repo(maven, "rules_android_maven")
 
 android = use_extension("@hermetic_android_toolchains//:extensions.bzl", "android", dev_dependency = True)
 android.sdk(
-    api_level = "35",
-    build_tools_sha256s = {"linux": "460544cb43f7208276cd41b7b3ed0ccc72a33700378c0fd3f5c07405fae4f82e"},
-    build_tools_strip_prefixes = {"linux": "android-sdk/build-tools/35.0.0"},
-    build_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz"},
-    build_tools_version = "35.0.0",
-    platform_tools_sha256s = {"linux": "460544cb43f7208276cd41b7b3ed0ccc72a33700378c0fd3f5c07405fae4f82e"},
+    api_level = "37.2",
+    build_tools_sha256s = {"linux": "1d9c475b70f66ec21dc225b25388214aaa41521000ee35a3fe89d8bb7ed467a6"},
+    build_tools_strip_prefixes = {"linux": "android-sdk/build-tools/37.0.0"},
+    build_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/37.0.0/android-sdk-aarch64-linux-musl.tar.xz"},
+    build_tools_version = "37.0.0",
+    platform_tools_sha256s = {"linux": "1d9c475b70f66ec21dc225b25388214aaa41521000ee35a3fe89d8bb7ed467a6"},
     platform_tools_strip_prefixes = {"linux": "android-sdk/platform-tools"},
-    platform_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/35.0.2/android-sdk-aarch64-linux-musl.tar.xz"},
-    platforms_sha256 = "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0",
-    platforms_url = "https://dl.google.com/android/repository/platform-35_r02.zip",
-    version = "35",
+    platform_tools_urls = {"linux": "https://github.com/HomuHomu833/android-sdk-custom/releases/download/37.0.0/android-sdk-aarch64-linux-musl.tar.xz"},
+    platforms_sha256 = "916410633df92a98da56aa7c87a1955f865f4d3b888373660794ef8173f72972",
+    platforms_url = "https://dl.google.com/android/repository/platform-37.2_r01.zip",
+    version = "37.2",
 )
+
+# NDK r29 is the newest stable NDK with ARM64 Linux host tools. Its newest
+# sysroot is API 35; the apps require API 36, Android 16.
 android.ndk(
-    api_level = 26,
+    api_level = 35,
     sha256s = {"linux": "fcc3b0ba65318317899fc296df0c5795d472a0cc3870b6fbf659939c1dde63ca"},
     strip_prefix = "android-ndk-r29",
     urls = {"linux": "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r29/android-ndk-r29-aarch64-linux-musl.tar.xz"},

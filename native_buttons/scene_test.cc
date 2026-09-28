@@ -66,7 +66,7 @@ void draw_text(Renderer& r, const char* text, float, float, float, Color, bool) 
 }
 
 RenderStats get_stats(const Renderer& r) {
-  return {r.width, r.height, r.width, r.height, 4, 16384, 0, 0, false};
+  return {r.width, r.height, r.width, r.height, 4, 16384, 0, 0};
 }
 
 std::string_view get_device(const Renderer&) { return "scene-test"; }

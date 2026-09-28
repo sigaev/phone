@@ -13,25 +13,6 @@
 #include <numbers>
 #include <vector>
 
-#if defined(NATIVE_BUTTONS_TEST_DEPTH_FALLBACK)
-#include <vulkan/vulkan.h>
-extern "C" VkResult __real_vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice, VkFormat,
-                                                                    VkImageType, VkImageTiling,
-                                                                    VkImageUsageFlags,
-                                                                    VkImageCreateFlags,
-                                                                    VkImageFormatProperties*);
-
-extern "C" VkResult __wrap_vkGetPhysicalDeviceImageFormatProperties(
-    VkPhysicalDevice physical, VkFormat format, VkImageType type, VkImageTiling tiling,
-    VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* properties) {
-  // Simulate a valid device without X8_D24. All other capabilities and rendering
-  // still use the real driver, including the fallback depth/shadow images.
-  if (format == VK_FORMAT_X8_D24_UNORM_PACK32) return VK_ERROR_FORMAT_NOT_SUPPORTED;
-  return __real_vkGetPhysicalDeviceImageFormatProperties(physical, format, type, tiling, usage,
-                                                         flags, properties);
-}
-#endif
-
 #include "common/gpu/renderer.h"
 #include "native_buttons/scene.h"
 
@@ -284,7 +265,7 @@ common::Result<void> run_probe(int argc, char** argv) {
   std::printf("Size: %dx%d; scene: %dx%d; MSAA: %d; particles: %d; triangles/color pass: %u\n",
               width, height, stats.render_width, stats.render_height, stats.samples,
               stats.particles, stats.triangles);
-  if (stats.has_gpu_timer && stats.gpu_ms > 0) std::printf("GPU: %.2f ms\n", stats.gpu_ms);
+  if (stats.gpu_ms > 0) std::printf("GPU: %.2f ms\n", stats.gpu_ms);
   else std::printf("Driver GPU timer queries unavailable\n");
   std::printf("Synchronous throughput: %.2f fps\n", 60 / seconds);
   if (argc > 1) return gpu::capture_frame(**renderer, argv[1]);

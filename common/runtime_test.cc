@@ -110,14 +110,14 @@ common::Result<void> check_runtime() {
 }
 
 extern "C" void* __real_malloc(std::size_t size);
-extern "C" int __real_posix_memalign(void** pointer, std::size_t alignment, std::size_t size);
+extern "C" void* __real_aligned_alloc(std::size_t alignment, std::size_t size);
 
 extern "C" void* __wrap_malloc(std::size_t size) {
   return fail_allocations ? nullptr : __real_malloc(size);
 }
 
-extern "C" int __wrap_posix_memalign(void** pointer, std::size_t alignment, std::size_t size) {
-  return fail_allocations ? ENOMEM : __real_posix_memalign(pointer, alignment, size);
+extern "C" void* __wrap_aligned_alloc(std::size_t alignment, std::size_t size) {
+  return fail_allocations ? nullptr : __real_aligned_alloc(alignment, size);
 }
 
 int main() {

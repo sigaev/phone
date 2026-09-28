@@ -51,6 +51,8 @@ cc_library(
         "storage.h",
     ],
     copts = ANDROID_COPTS,
+    # ANativeWindow_setFrameRate.
+    linkopts = ["-lnativewindow"],
     target_compatible_with = ["@platforms//os:android"],
     deps = [
         ":scene",
@@ -172,31 +174,12 @@ cc_test(
     size = "medium",
     srcs = ["runtime_fault_test.cc"],
     copts = ANDROID_COPTS,
-    linkopts = ["-Wl,--wrap=AChoreographer_postFrameCallback"],
+    linkopts = ["-Wl,--wrap=AChoreographer_postFrameCallback64"],
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
         ":gestures",
         ":runtime",
-        ":scene",
-        "//common:support",
-        "//common/gpu",
-    ],
-)
-
-cc_test(
-    name = "depth_fallback_test",
-    size = "medium",
-    srcs = ["gpu_probe.cc"],
-    args = ["--exercise"],
-    copts = ANDROID_COPTS + ["-DNATIVE_BUTTONS_TEST_DEPTH_FALLBACK"] + select({
-        "//tools:vulkan_validation": ["-DNATIVE_BUTTONS_VULKAN_VALIDATION"],
-        "//conditions:default": [],
-    }),
-    linkopts = ["-Wl,--wrap=vkGetPhysicalDeviceImageFormatProperties"],
-    linkstatic = True,
-    target_compatible_with = ["@platforms//os:android"],
-    deps = [
         ":scene",
         "//common:support",
         "//common/gpu",
@@ -236,7 +219,6 @@ cc_test(
         "-Wl,--wrap=vkCreateAndroidSurfaceKHR",
         "-Wl,--wrap=vkDestroySurfaceKHR",
         "-Wl,--wrap=vkGetPhysicalDeviceSurfaceSupportKHR",
-        "-Wl,--wrap=vkGetPhysicalDeviceSurfaceFormatsKHR",
         "-Wl,--wrap=vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
         "-Wl,--wrap=vkCreateSwapchainKHR",
         "-Wl,--wrap=vkDestroySwapchainKHR",

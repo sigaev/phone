@@ -29,7 +29,6 @@ struct RenderStats {
   int width, height, render_width, render_height, samples, particles;
   unsigned triangles;
   float gpu_ms;
-  bool has_gpu_timer;
 };
 
 common::Result<common::Owner<Renderer>> create_renderer(ANativeWindow* window, SceneShaders shaders,

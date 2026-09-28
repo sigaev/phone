@@ -86,10 +86,9 @@ and scene use the full window; only the overlays respect content insets.
 Controls retain at least 48 dp touch targets. Short windows use a compact
 translucent toolbar instead of shrinking the buttons.
 Android's saved Activity state includes the count, selected bird, detail setting,
-pause state, camera yaw, zoom, and animation time in a validated, versioned record. Version 1
-records use the default zoom; legacy count-only records remain supported too.
-Version 4 adds the bird selection without increasing the record size. Older
-records restore the pelican; new sessions start with the flamingo.
+pause state, camera yaw, zoom, and animation time in a validated, versioned record.
+Only the current version 4 record is accepted; other data starts a new session,
+which shows the flamingo.
 Animation time is accumulated and saved in double precision. CPU and shader
 oscillations use a shared bounded phase, while scenery, camera orbit, road
 markings, and particles retain their own cycles, so long sessions keep animating
@@ -118,9 +117,9 @@ Compiler and linker flags come from `//tools:android.bzl`, including
 C++23, link-time optimization across all native libraries, full symbol
 stripping, and 16 KiB ELF segment alignment. Vulkan GLSL lives
 in `shaders/` and `//common/gpu/shaders`; Bazel compiles and validates SPIR-V 1.6 with
-the pinned NDK shader tools and embeds it in the native library. Android's API 26
-stub library exports only Vulkan 1.0 commands, so the renderer loads the newer
-core commands it records from the driver.
+the pinned NDK shader tools and embeds it in the native library. NDK r29's API 35
+stub library predates Vulkan 1.4, so the renderer loads its one Vulkan 1.4
+command, `vkCmdPushDescriptorSet`, from the driver.
 `//common:support` links libc++ runtime sources built by Bazel without exceptions,
 RTTI, or unwind tables. The prebuilt NDK C++ runtime, libc++abi, libunwind, and
 demangler are excluded. `std::nothrow` allocation still returns null on failure;
@@ -130,7 +129,7 @@ The `native_buttons`
 `android_binary` links `libnative_buttons.so`, processes the manifest, and
 packages, aligns, and signs the APK. The manifest's `android.app.lib_name`
 matches the shared library. The application ID is `dev.demo.nativebuttons`;
-minimum Android API is 26 and target API is 35. The manifest requires Vulkan 1.4,
+minimum and target Android API are 36. The manifest requires Vulkan 1.4,
 matching the renderer's device check.
 
 The optional `gpu_probe` target renders and benchmarks the same scene on this
@@ -162,8 +161,7 @@ Run the native regression suite on the phone:
 bazel test //common:runtime_test //native_buttons:application_test \
     //native_buttons:runtime_fault_test //native_buttons:scene_test \
     //native_buttons:state_test //native_buttons:gestures_test //native_buttons:renderer_test \
-    //native_buttons:presentation_test \
-    //native_buttons:depth_fallback_test --platforms=//:arm64-v8a \
+    //native_buttons:presentation_test --platforms=//:arm64-v8a \
     --run_under=//tools:android_test_runner
 ```
 
@@ -179,7 +177,7 @@ zero-sized surface recovery, visible/hidden Activity transitions, surface
 recreation, idle query errors, and visible button hit targets. It also checks
 transient retries and redraw timeout/cleanup when no vsync callbacks arrive.
 Subprocess checks verify bounded snapshots, detachment and shutdown with a stalled worker or GPU
-destructor. State tests cover round trips, legacy data, and malformed records.
+destructor. State tests cover round trips and rejected or malformed records.
 Gesture tests exercise real motion-event handling with synthetic Android pointers,
 including reordered indices, extra fingers, near-zero spans, cancellation,
 single-finger taps after pinching, and chronological processing of batched motion.
@@ -193,8 +191,7 @@ GPU tests exercise portrait and landscape offscreen targets, preparation boundar
 readback, both bird workloads, switching birds at a frozen timestamp, camera zoom
 at both limits, and fixed-quality animation with
 the changing UI excluded. Fixed-camera captures also check shader-driven motion
-at large timestamps and across phase wraps. The depth-fallback test simulates
-unsupported X8_D24 and renders with another format on the real GPU.
+at large timestamps and across phase wraps.
 The presentation test uses real GPU commands with a simulated display boundary
 to exercise delayed window-size reports, capabilities cached until presentation,
 all four rotations, transform-only changes,
@@ -204,8 +201,7 @@ transient swapchain failures, and presentation-fence retirement.
 Enable Khronos API and synchronization validation for the GPU tests:
 
 ```sh
-bazel test //native_buttons:renderer_test //native_buttons:depth_fallback_test \
-    //native_buttons:presentation_test \
+bazel test //native_buttons:renderer_test //native_buttons:presentation_test \
     --platforms=//:arm64-v8a --define=vulkan_validation=true \
     --run_under=//tools:vulkan_validation_runner
 ```

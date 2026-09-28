@@ -35,7 +35,8 @@ rotates in all four orientations, drawing edge to edge and keeping controls
 out of the system bars and display cutouts, which it reads from the window's
 insets. Keyboards and D-pads also work: digits enter, arrows move the
 selection, Backspace or 0 erases, N toggles notes, U or Ctrl+Z undoes, P or
-Space pauses, Enter confirms dialogs, and Back closes them.
+Space pauses, Enter confirms dialogs, and Back closes them. The manifest opts
+out of predictive back so Back still arrives as a key event.
 
 ## Puzzles
 
@@ -79,7 +80,7 @@ bazel build //sudoku
 ```
 
 Output: `bazel-bin/sudoku/sudoku.apk`, about 66 KB. The application ID is
-`dev.demo.sudoku`; minimum Android API is 26 and target API is 35. The native
+`dev.demo.sudoku`; minimum and target Android API are 36. The native
 library uses the same flags as `native_buttons`: the exception-free libc++
 runtime from `//common:support`, link-time optimization, no unwind tables, full
 stripping, and 16 KiB segment alignment. It exports only

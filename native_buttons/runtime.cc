@@ -4,7 +4,6 @@
 #include <android/log.h>
 #include <android/looper.h>
 #include <android/native_window.h>
-#include <dlfcn.h>
 #include <pthread.h>
 #include <sys/eventfd.h>
 #include <time.h>
@@ -116,7 +115,7 @@ struct Runtime {
   unsigned redraw_sequence = 0;
   bool dragging = false;
   float last_x = 0, down_x = 0, down_y = 0, touch_slop = 8, density = 1, fps = 0;
-  long last_frame = 0;
+  int64_t last_frame = 0;
   double fps_time = 0;
   unsigned fps_frames = 0;
 };
@@ -262,7 +261,7 @@ bool needs_frame(const Runtime& r) {
 
 void schedule_frame(Runtime& r);
 
-void on_frame(long nanos, void* data) {
+void on_frame(int64_t nanos, void* data) {
   auto& r = *static_cast<Runtime*>(data);
   r.frame_pending = false;
   if (!needs_frame(r)) return;
@@ -292,7 +291,7 @@ void on_frame(long nanos, void* data) {
 void schedule_frame(Runtime& r) {
   if (needs_frame(r) && !r.frame_pending) {
     r.frame_pending = true;
-    AChoreographer_postFrameCallback(r.choreographer, on_frame, &r);
+    AChoreographer_postFrameCallback64(r.choreographer, on_frame, &r);
   }
 }
 
@@ -350,11 +349,9 @@ Result<void> create_surface(Runtime& r, Command& command) {
   auto scene = create_scene(*r.renderer);
   if (!scene) return std::unexpected(scene.error());
   r.scene = std::move(*scene);
-  if (r.window) {
-    using SetRate = int (*)(ANativeWindow*, float, int8_t);
-    auto set_rate = reinterpret_cast<SetRate>(dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate"));
-    if (set_rate) set_rate(r.window->handle, 60.f, 0);
-  }
+  if (r.window)
+    ANativeWindow_setFrameRate(r.window->handle, 60.f,
+                               ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT);
   return draw(r, false);
 }
 

@@ -11,10 +11,11 @@ build --spawn_strategy=local
 
 # The APK targets Android ARM64.
 build --android_platforms=//:arm64-v8a
+build --copt=-march=armv9-a
 
-# Every app requires API 26, which verifies APK Signature Scheme v2 and later,
-# so omit the legacy v1 JAR signature files.
-build --apk_signing_method=v2
+# Every app requires API 36, which verifies APK Signature Scheme v3, so omit v1
+# and v2. Bazel's v4 method signs the APK with v3 and writes a v4 .idsig beside it.
+build --apk_signing_method=v4
 
 # Always build optimized binaries.
 build -c opt
