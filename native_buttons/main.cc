@@ -10,6 +10,7 @@
 #include <cstring>
 #include <new>
 #include <string>
+#include <vector>
 
 #include "native_buttons/gestures.h"
 #include "native_buttons/runtime.h"
@@ -68,6 +69,40 @@ void report(App& app, const std::string& message, bool fatal) {
   }
 }
 
+// The fastest refresh rate the display can switch to seamlessly at its current
+// resolution, or zero if Android does not report one.
+float peak_refresh_rate(ANativeActivity* activity) {
+  JNIEnv* env = activity->env;
+  if (env->PushLocalFrame(8) != 0) {
+    env->ExceptionClear();
+    return 0;
+  }
+  auto call = [&](jobject object, const char* name, const char* signature) -> jobject {
+    if (!object || env->ExceptionCheck()) return nullptr;
+    jmethodID method = env->GetMethodID(env->GetObjectClass(object), name, signature);
+    return method && !env->ExceptionCheck() ? env->CallObjectMethod(object, method) : nullptr;
+  };
+  jobject display = call(activity->clazz, "getDisplay", "()Landroid/view/Display;");
+  jobject mode = call(display, "getMode", "()Landroid/view/Display$Mode;");
+  jmethodID current = mode && !env->ExceptionCheck()
+                          ? env->GetMethodID(env->GetObjectClass(mode), "getRefreshRate", "()F")
+                          : nullptr;
+  float peak = current && !env->ExceptionCheck() ? env->CallFloatMethod(mode, current) : 0;
+  auto alternatives = static_cast<jfloatArray>(call(mode, "getAlternativeRefreshRates", "()[F"));
+  if (alternatives && !env->ExceptionCheck()) {
+    jsize count = env->GetArrayLength(alternatives);
+    std::vector<jfloat> rates(count);
+    env->GetFloatArrayRegion(alternatives, 0, count, rates.data());
+    for (float rate : rates) peak = std::max(peak, rate);
+  }
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    peak = 0;
+  }
+  env->PopLocalFrame(nullptr);
+  return peak;
+}
+
 common::Result<void> configure_input(App& app) {
   JNIEnv* env = app.activity->env;
   jclass type = env->FindClass("android/view/ViewConfiguration");
@@ -99,6 +134,7 @@ common::Result<void> configure_input(App& app) {
   if (density <= 0 || density >= ACONFIGURATION_DENSITY_ANY)
     density = ACONFIGURATION_DENSITY_MEDIUM;
   set_density(*app.runtime, float(density) / ACONFIGURATION_DENSITY_MEDIUM);
+  set_peak_refresh_rate(*app.runtime, peak_refresh_rate(app.activity));
   set_touch_slop(*app.runtime, float(pixels));
   set_gesture_slop(*app.gestures, float(pixels));
   return {};

@@ -72,6 +72,13 @@ void draw_text(Renderer& renderer, const char* value, float x, float baseline, f
 // above it. The width is the advance width that centered text uses.
 Rect measure_text(const Renderer& renderer, const char* value, float height);
 common::Result<bool> present(Renderer& renderer);
+// Keep the next presented frame off the display until this CLOCK_MONOTONIC
+// time, such as a Choreographer frame timeline's expected presentation.
+void set_present_time(Renderer& renderer, std::int64_t nanoseconds);
+// Count timed frames the display reported since the last call that slipped: they
+// reached it more than half a refresh cycle later, relative to their requested
+// times, than the previous timed frame. A steady delay is not a slip.
+unsigned take_late_frames(Renderer& renderer);
 common::Result<void> capture_frame(Renderer& renderer, const char* ppm_path);
 common::Result<void> wait_frame(Renderer& renderer);
 // Capture tightly packed RGBA rows from top to bottom on an offscreen renderer.

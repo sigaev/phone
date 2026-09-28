@@ -49,6 +49,8 @@ void pinch(Runtime& runtime, float scale);
 // Pass ViewConfiguration.getScaledTouchSlop() in window pixels.
 void set_touch_slop(Runtime& runtime, float pixels);
 void set_density(Runtime& runtime, float pixels_per_dp);
+// The display's fastest refresh rate. Animation paces to it or a fraction of it.
+void set_peak_refresh_rate(Runtime& runtime, float hertz);
 RuntimeState get_state(Runtime& runtime);
 // Lifecycle-only barrier: include startup loading and all previously queued actions.
 common::Result<RuntimeState> capture_state(Runtime& runtime);

@@ -24,6 +24,30 @@ int window_width = 320, window_height = 720, buffer_width = 320, buffer_height =
 VkSurfaceTransformFlagBitsKHR transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 VkResult acquire_result = VK_SUCCESS, present_result = VK_SUCCESS, creation_result = VK_SUCCESS;
 unsigned creations = 0, presentation_waits = 0;
+// The desired presentation time of the last present, or zero without one.
+uint64_t desired_present_time = 0;
+// Display timing reports that the next query returns, for a 120 Hz display.
+constexpr uint64_t kRefresh = 8333333;
+std::vector<VkPastPresentationTimingGOOGLE> reported_timings;
+
+VKAPI_ATTR VkResult VKAPI_CALL refresh_cycle(VkDevice, VkSwapchainKHR,
+                                             VkRefreshCycleDurationGOOGLE* duration) {
+  duration->refreshDuration = kRefresh;
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL past_presentations(VkDevice, VkSwapchainKHR, uint32_t* count,
+                                                  VkPastPresentationTimingGOOGLE* timings) {
+  if (timings) {
+    *count = std::min<uint32_t>(*count, reported_timings.size());
+    std::copy_n(reported_timings.begin(), *count, timings);
+    reported_timings.erase(reported_timings.begin(), reported_timings.begin() + *count);
+  } else {
+    *count = reported_timings.size();
+  }
+  return VK_SUCCESS;
+}
+
 bool hide_maintenance = false;
 bool resize_on_acquire = false, resize_on_present = false;
 bool cache_capabilities = false;
@@ -235,6 +259,11 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkQueuePresentKHR(VkQueue q, const VkPrese
   require(completion && completion->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT &&
               completion->swapchainCount == 1,
           "Presentation has no completion fence");
+  const auto* timing = static_cast<const VkPresentTimesInfoGOOGLE*>(completion->pNext);
+  require(!timing || (timing->sType == VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE &&
+                      timing->swapchainCount == 1),
+          "Presentation has invalid display timing");
+  desired_present_time = timing ? timing->pTimes[0].desiredPresentTime : 0;
   auto result = present_result;
   present_result = VK_SUCCESS;
   if (result == VK_ERROR_OUT_OF_HOST_MEMORY || result == VK_ERROR_OUT_OF_DEVICE_MEMORY)
@@ -289,6 +318,17 @@ VKAPI_ATTR void VKAPI_CALL __wrap_vkDestroySemaphore(VkDevice device, VkSemaphor
     require(p.semaphore != semaphore || p.observed,
             "Destroyed a semaphore still used by presentation");
   __real_vkDestroySemaphore(device, semaphore, allocator);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL __real_vkGetDeviceProcAddr(VkDevice, const char*);
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL __wrap_vkGetDeviceProcAddr(VkDevice device,
+                                                                    const char* name) {
+  if (!std::strcmp(name, "vkGetRefreshCycleDurationGOOGLE"))
+    return reinterpret_cast<PFN_vkVoidFunction>(refresh_cycle);
+  if (!std::strcmp(name, "vkGetPastPresentationTimingGOOGLE"))
+    return reinterpret_cast<PFN_vkVoidFunction>(past_presentations);
+  return __real_vkGetDeviceProcAddr(device, name);
 }
 
 VKAPI_ATTR void VKAPI_CALL __real_vkDestroyFence(VkDevice, VkFence, const VkAllocationCallbacks*);
@@ -428,6 +468,23 @@ int main() {
     window_width = previous_width;
     recovered = draw();
     require(recovered && *recovered, "Temporarily zero-sized surface did not recover");
+    gpu::set_present_time(**renderer, 123456789);
+    auto timed = draw();
+    require(timed && *timed && desired_present_time == 123456789,
+            "Presentation ignored its desired time");
+    auto untimed = draw();
+    require(untimed && *untimed && !desired_present_time, "A desired presentation time was reused");
+    // Frames shown a refresh after their requested times keep a steady 60 Hz
+    // cadence. Only a frame shown later than that, relative to its request, slipped.
+    auto report = [](uint64_t frame, uint64_t delay) {
+      uint64_t desired = 1000000000 + frame * 2 * kRefresh;
+      reported_timings.push_back({unsigned(frame), desired, desired + delay, desired, 0});
+    };
+    for (uint64_t frame = 0; frame < 5; ++frame) report(frame, kRefresh + 2000000);
+    require(gpu::take_late_frames(**renderer) == 0, "A steady presentation delay was late");
+    report(5, 2 * kRefresh + 2000000);
+    report(6, 2 * kRefresh + 2000000);
+    require(gpu::take_late_frames(**renderer) == 1, "A slipped presentation was not late");
     capabilities_result = VK_ERROR_SURFACE_LOST_KHR;
     require(!gpu::surface_changed(**renderer), "Idle surface query error was ignored");
     capabilities_result = VK_SUCCESS;

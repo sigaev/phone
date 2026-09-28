@@ -174,7 +174,12 @@ cc_test(
     size = "medium",
     srcs = ["runtime_fault_test.cc"],
     copts = ANDROID_COPTS,
-    linkopts = ["-Wl,--wrap=AChoreographer_postFrameCallback64"],
+    linkopts = [
+        "-Wl,--wrap=AChoreographer_postVsyncCallback",
+        "-Wl,--wrap=clock_gettime",
+        "-Wl,--wrap=timerfd_create",
+        "-Wl,--wrap=timerfd_settime",
+    ],
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
@@ -229,6 +234,7 @@ cc_test(
         "-Wl,--wrap=vkDestroySemaphore",
         "-Wl,--wrap=vkDestroyFence",
         "-Wl,--wrap=vkDeviceWaitIdle",
+        "-Wl,--wrap=vkGetDeviceProcAddr",
     ],
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],

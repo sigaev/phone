@@ -17,6 +17,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <new>
+#include <utility>
 #include <vector>
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
@@ -47,7 +48,13 @@ constexpr int kFontHeight = 128;
 constexpr int kFontPadding = 16;
 // Rows above the packed glyphs hold white texels for solid geometry.
 constexpr int kAtlasReserved = 4;
-constexpr unsigned kFrameCount = 2;
+// The CPU records a frame while the GPU renders up to two earlier ones, so frame
+// submission never waits for the GPU at a sustainable rate.
+constexpr unsigned kFrameCount = 3;
+// Frames wait in the swapchain until their requested presentation, several
+// refreshes ahead at the peak rate. With this many images, acquisition does not
+// block the CPU on the compositor.
+constexpr unsigned kSwapchainImages = 6;
 constexpr VkFormat kHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 // Android swapchains always offer this format with sRGB nonlinear color.
 constexpr VkFormat kOutputFormat = VK_FORMAT_R8G8B8A8_UNORM;
@@ -175,8 +182,11 @@ struct Renderer {
   VkPhysicalDeviceMemoryProperties memory{};
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
-  // NDK r29's newest stub library, API 35, predates this Vulkan 1.4 command.
+  // NDK r29's newest stub library, API 35, predates this Vulkan 1.4 command and
+  // exports no display timing commands.
   PFN_vkCmdPushDescriptorSet push_descriptor_set = nullptr;
+  PFN_vkGetRefreshCycleDurationGOOGLE refresh_cycle = nullptr;
+  PFN_vkGetPastPresentationTimingGOOGLE past_presentations = nullptr;
   unsigned queue_family = 0;
   VkSurfaceKHR surface = VK_NULL_HANDLE;
   VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -206,6 +216,10 @@ struct Renderer {
   std::vector<UiVertex> ui;
   Glyph glyphs[96]{};
   Mat4 model_transform;
+  std::int64_t present_time = 0;
+  // How much later than requested the last timed frame reached the display.
+  std::int64_t lateness = 0;
+  bool has_lateness = false;
 };
 
 namespace {
@@ -556,7 +570,8 @@ Result<void> create_context(Renderer& r) {
   features.pNext = &vulkan13;
   features.features.largePoints = !r.overlay;
   const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                              VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME};
+                              VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                              VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME};
   VkDeviceCreateInfo device{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
   device.pNext = &features;
   device.queueCreateInfoCount = 1;
@@ -567,7 +582,7 @@ Result<void> create_context(Renderer& r) {
   }
   created = vkCreateDevice(r.physical, &device, nullptr, &r.device);
   if (created == VK_ERROR_EXTENSION_NOT_PRESENT || created == VK_ERROR_FEATURE_NOT_PRESENT)
-    return fail("The GPU lacks large points or swapchain presentation fences", created);
+    return fail("The GPU lacks a required Vulkan feature or extension", created);
   VK_CHECK(created);
   vkGetDeviceQueue(r.device, r.queue_family, 0, &r.queue);
   r.push_descriptor_set = reinterpret_cast<PFN_vkCmdPushDescriptorSet>(
@@ -803,7 +818,7 @@ void destroy_targets(Renderer& r) {
 
 Result<bool> create_swapchain(Renderer& r, const VkSurfaceCapabilitiesKHR& capabilities) {
   if (r.width <= 0 || r.height <= 0) return false;
-  unsigned count = capabilities.minImageCount + 1;
+  unsigned count = std::max(capabilities.minImageCount + 1, kSwapchainImages);
   if (capabilities.maxImageCount) count = std::min(count, capabilities.maxImageCount);
   VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
   info.surface = r.surface;
@@ -832,6 +847,7 @@ Result<bool> create_swapchain(Renderer& r, const VkSurfaceCapabilitiesKHR& capab
   std::vector<VkImage> images(count);
   VK_CHECK(vkGetSwapchainImagesKHR(r.device, r.swapchain, &count, images.data()));
   r.surface_images.resize(count);
+  r.has_lateness = false;
   for (unsigned i = 0; i < count; ++i) {
     auto& image = r.surface_images[i];
     image.target.device = r.device;
@@ -1293,6 +1309,38 @@ void add(Renderer& renderer, MeshId mesh, Mat4 model, Color color, float roughne
 
 void set_transform(Renderer& renderer, Mat4 transform) { renderer.model_transform = transform; }
 
+void set_present_time(Renderer& renderer, std::int64_t nanoseconds) {
+  renderer.present_time = nanoseconds;
+}
+
+unsigned take_late_frames(Renderer& r) {
+  if (!r.swapchain) return 0;
+  // Loaded on first use, so apps that never ask do not carry them.
+  if (!r.past_presentations) {
+    r.refresh_cycle = reinterpret_cast<PFN_vkGetRefreshCycleDurationGOOGLE>(
+        vkGetDeviceProcAddr(r.device, "vkGetRefreshCycleDurationGOOGLE"));
+    r.past_presentations = reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
+        vkGetDeviceProcAddr(r.device, "vkGetPastPresentationTimingGOOGLE"));
+    if (!r.refresh_cycle || !r.past_presentations) return 0;
+  }
+  VkRefreshCycleDurationGOOGLE refresh;
+  unsigned count = 0;
+  if (r.refresh_cycle(r.device, r.swapchain, &refresh) != VK_SUCCESS ||
+      r.past_presentations(r.device, r.swapchain, &count, nullptr) != VK_SUCCESS || !count)
+    return 0;
+  std::vector<VkPastPresentationTimingGOOGLE> timings(count);
+  if (r.past_presentations(r.device, r.swapchain, &count, timings.data()) < VK_SUCCESS) return 0;
+  unsigned late = 0;
+  for (unsigned i = 0; i < count; ++i) {
+    if (!timings[i].desiredPresentTime) continue;
+    auto lateness = std::int64_t(timings[i].actualPresentTime - timings[i].desiredPresentTime);
+    late += r.has_lateness && lateness > r.lateness + std::int64_t(refresh.refreshDuration / 2);
+    r.lateness = lateness;
+    r.has_lateness = true;
+  }
+  return late;
+}
+
 Result<MeshId> create_mesh(Renderer& r, std::span<const Vertex> vertices,
                            std::span<const unsigned> indices) {
   if (vertices.empty() || indices.empty()) return fail("A mesh must contain vertices and indices");
@@ -1480,6 +1528,7 @@ Result<bool> render_overlay(Renderer& r, Color background) {
 }
 
 Result<bool> present(Renderer& r) {
+  auto desired = std::exchange(r.present_time, 0);
   auto& frame = r.frames[r.frame_index];
   if (auto result = reserve_buffer(r, frame.ui, r.ui.size() * sizeof(UiVertex),
                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
@@ -1509,6 +1558,11 @@ Result<bool> present(Renderer& r) {
     VkSwapchainPresentFenceInfoEXT completion{VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT};
     completion.swapchainCount = 1;
     completion.pFences = &image->presented;
+    VkPresentTimeGOOGLE time{0, std::uint64_t(desired)};
+    VkPresentTimesInfoGOOGLE timing{VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE};
+    timing.swapchainCount = 1;
+    timing.pTimes = &time;
+    if (desired > 0) completion.pNext = &timing;
     VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     present.pNext = &completion;
     present.waitSemaphoreCount = 1;

@@ -54,9 +54,40 @@ created with the scene, so switching needs no resource rebuild.
 **High detail** uses native resolution,
 4x MSAA, 2048-pixel shadows, and 16,384 particles. **Ultra detail** uses
 130% resolution, 4096-pixel shadows, more scenery, and 65,536 particles.
-The display shows measured frame rate and GPU time when timer queries are
-available. The frame loop follows Android's Choreographer, requests a 60 Hz
-display mode, and stops when the Activity pauses or loses its window.
+The display shows measured frame rate and GPU time. The window requests the
+display's peak refresh rate, which the Activity reads from its display mode, as
+fixed-rate content, so Android keeps the display there. Animation emulates the
+peak rate divided by N, such as 120, 60, 40, 30, or 24 fps, on an exact grid of
+presentation times N refreshes apart. Android throttles an app's Choreographer
+to the rate the app presents at, so Choreographer only describes the upcoming
+vsyncs: their expected presentation times and how long before presentation a
+frame must be ready. A timer on the rendering thread starts each frame just in
+time for its slot, allowing for the average CPU and GPU time plus a lead, and
+the frame asks the display not to show it before the slot. The lead starts at
+2 ms and grows by 2 ms per late frame, up to a refresh, since GPU time varies
+from frame to frame; it shrinks slowly while frames are on time. Rendering is pipelined: the CPU
+records a frame while the GPU renders up to two earlier ones, and six swapchain
+images hold frames queued ahead of their presentation, so the rendering thread
+does not wait on the GPU or the compositor.
+
+N is the smallest interval whose budget fits the lowest frame cost measured
+since the surface or detail level changed, where the cost is the larger of the
+CPU and GPU time, since the two overlap. The GPU also overlaps consecutive
+frames: on this phone, High sustains 120 fps with a measured GPU time of about
+9.4 ms against an 8.3 ms budget, so the budget allows 1.2 times its length.
+Each change starts at the peak rate, where GPU clocks run highest, and measures
+after 30 frames, or up to twice as long while the cost is still falling as the
+GPU warms up. A frame is late when display timing shows it reached the
+screen more than half a refresh later, relative to its requested time, than the
+previous frame, or when its thread woke too late to record it before the
+deadline. Late frames first lengthen the lead; with a full refresh of lead,
+four late frames within 120 raise a floor under N by one, so a few misses are
+tolerated, and the floor relaxes by one after each hold without misses. The GPU
+clock falls at slower rates, inflating the cost, so after a hold a faster rate
+whose budget is within 1.25 times the cost is measured again and kept if it
+fits. The hold starts at one second and doubles, up to 32 seconds, when a faster
+rate fails within five seconds. Late signals right after a rate or display mode
+change are ignored. The loop stops when the Activity pauses or loses its window.
 Rendering and counter persistence run on a dedicated native thread. Required
 window-redraw callbacks wait for a completed frame, including while paused;
 window-destruction callbacks wait until the worker releases the surface.
@@ -182,7 +213,14 @@ Gesture tests exercise real motion-event handling with synthetic Android pointer
 including reordered indices, extra fingers, near-zero spans, cancellation,
 single-finger taps after pinching, and chronological processing of batched motion.
 The real-worker tests check batched excursions that return inside a Reset button,
-valid batched jitter, and 60 Hz clock updates after days of saved animation time.
+valid batched jitter, and 60 Hz clock updates after days of saved animation time,
+including simulated displays that draw every refresh with a fast GPU, keep doing
+so while Android runs a 120 Hz display at 60 Hz for two seconds, settle on every
+other refresh when the GPU is too slow, return to every refresh once it is fast
+enough, settle on every third refresh for a slower GPU while Choreographer calls
+back on only every other vsync, keep every refresh for a GPU that starts slowly
+and slows down further at lower rates, keep 60 fps when occasional frames cost
+more than average, and keep 120 fps while a GPU warms up.
 Application tests cover zoom limits, paused zooming, accidental-tap prevention,
 and zoom restoration across recreation. They also check touch and keyboard bird
 selection while paused, selection restoration, matching captions, and usable
@@ -196,7 +234,8 @@ The presentation test uses real GPU commands with a simulated display boundary
 to exercise delayed window-size reports, capabilities cached until presentation,
 all four rotations, transform-only changes,
 resizes during acquisition/presentation, zero extents, idle geometry queries,
-transient swapchain failures, and presentation-fence retirement.
+transient swapchain failures, requested presentation times, late-frame reports
+that ignore a steady delay, and presentation-fence retirement.
 
 Enable Khronos API and synchronization validation for the GPU tests:
 

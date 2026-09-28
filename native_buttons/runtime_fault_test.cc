@@ -3,6 +3,7 @@
 #include <android/looper.h>
 #include <sys/eventfd.h>
 #include <sys/resource.h>
+#include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -12,6 +13,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
 #include <vector>
 
 #include "common/gpu/renderer.h"
@@ -22,6 +24,11 @@ struct AInputEvent {
   int action;
   gpu::Vec3 current;
   std::vector<gpu::Vec3> history;
+};
+
+// Frame timelines one refresh apart, starting with the preferred timeline.
+struct AChoreographerFrameCallbackData {
+  int64_t presentation, period;
 };
 
 extern "C" {
@@ -44,6 +51,27 @@ float AMotionEvent_getHistoricalX(const AInputEvent* event, size_t, size_t sampl
 float AMotionEvent_getHistoricalY(const AInputEvent* event, size_t, size_t sample) {
   return event->history.at(sample).y;
 }
+
+size_t AChoreographerFrameCallbackData_getFrameTimelinesLength(
+    const AChoreographerFrameCallbackData*) {
+  return 2;
+}
+
+size_t AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex(
+    const AChoreographerFrameCallbackData*) {
+  return 0;
+}
+
+int64_t AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos(
+    const AChoreographerFrameCallbackData* vsync, size_t timeline) {
+  return vsync->presentation + int64_t(timeline) * vsync->period;
+}
+
+// Like this phone, a frame must be ready two refreshes before its presentation.
+int64_t AChoreographerFrameCallbackData_getFrameTimelineDeadlineNanos(
+    const AChoreographerFrameCallbackData* vsync, size_t timeline) {
+  return vsync->presentation + (int64_t(timeline) - 2) * vsync->period;
+}
 }
 
 namespace {
@@ -56,17 +84,56 @@ std::atomic<bool> stall_render{false}, stall_destroy{false}, worker_stalled{fals
 std::atomic<std::uint64_t> surface_geometry{0};
 std::atomic<unsigned> surface_checks{0};
 std::atomic<bool> surface_query_failure{false};
+// Frames requested closer together than the simulated GPU frame cost are
+// reported late. Also track requested times and their spacing.
+std::atomic<int64_t> frame_cost{0}, present_time{0}, present_spacing{0}, simulated_now{0};
+std::atomic<unsigned> late_frames{0}, uneven_presents{0}, warmup_frames{0}, presents{0},
+    spike_every{0};
+std::atomic<int64_t> spike_cost{0};
+std::atomic<float> slow_clock{1}, settle_excess{0};
+constexpr int64_t kWarmupCost = 16000000;
+
+// The simulated GPU cost of the next frame at the current frame spacing.
+int64_t simulated_cost() {
+  if (warmup_frames) return kWarmupCost;
+  return present_spacing > 12000000 ? int64_t(frame_cost * slow_clock) : frame_cost.load();
+}
+
+// The GPU time the runtime measures, which may still be settling.
+float measured_cost() { return simulated_cost() * (1 + settle_excess) / 1e6f; }
 
 std::uint64_t geometry(int width, int height) {
   return (std::uint64_t(width) << 32) | unsigned(height);
 }
 
-// Deliver deterministic 60 Hz timestamps on the real worker's looper, without
+// Deliver deterministic vsync timelines on the real worker's looper, without
 // sleeping for animation time or calling the worker recursively.
+// Vsyncs at each display rate and simulated GPU frame cost in turn. Like this
+// phone, Choreographer may call back on only every so many vsyncs, the GPU may
+// start slowly, its clock may fall at slower frame rates, raising the cost, and
+// every so many frames may cost more than the average the runtime measures.
+struct Mode {
+  unsigned callbacks, rate;
+  int64_t cost;
+  unsigned every = 1, warmup = 0;
+  float slow_clock = 1;
+  unsigned spike_every = 0;
+  int64_t spike = 0;
+  // The measured GPU time starts this much higher and settles by 5% of the
+  // difference per frame, like this phone's GPU warming up.
+  float settle = 0;
+};
+
+// Simulated time advances to each vsync callback, just after its deadline for the
+// first timeline, or to the frame timer if that fires first. It starts a second
+// ahead of the real clock and advances faster, so real time never overtakes it.
 struct FrameClock {
   int fd;
-  unsigned remaining = 600, delivered = 0;
-  AChoreographer_frameCallback64 callback = nullptr;
+  std::vector<Mode> modes;
+  unsigned remaining = 0, delivered = 0, rate = 0;
+  int64_t presentation = 0, timer = 0;
+  int timer_fd = -1;
+  AChoreographer_vsyncCallback callback = nullptr;
   void* data = nullptr;
   std::atomic<bool> finished{false};
 };
@@ -78,17 +145,54 @@ void destroy(FrameClock* clock) noexcept {
   delete clock;
 }
 
+void wake(int fd) {
+  const std::uint64_t one = 1;
+  if (write(fd, &one, sizeof(one)) != sizeof(one)) std::abort();
+}
+
 int deliver_frame(int fd, int, void* data) {
   auto& clock = *static_cast<FrameClock*>(data);
-  std::uint64_t signal;
-  if (read(fd, &signal, sizeof(signal)) != sizeof(signal)) std::abort();
+  std::uint64_t signals;
+  if (read(fd, &signals, sizeof(signals)) != sizeof(signals)) std::abort();
+  if (!clock.remaining) return 1;
+  unsigned rate = 0, every = 1, callbacks = clock.delivered;
+  int64_t cost = 0;
+  for (auto mode : clock.modes)
+    if (!rate && callbacks < mode.callbacks) {
+      rate = mode.rate;
+      cost = mode.cost;
+      every = mode.every;
+      slow_clock = mode.slow_clock;
+      spike_every = mode.spike_every;
+      spike_cost = mode.spike;
+    } else if (!rate) {
+      callbacks -= mode.callbacks;
+    }
+  int64_t period = 1000000000 / rate, presentation = clock.presentation + period;
+  int64_t callback_time = presentation - 2 * period + 1000000;
+  if (clock.timer && clock.timer <= callback_time) {
+    simulated_now = std::max<int64_t>(simulated_now, clock.timer);
+    clock.timer = 0;
+    wake(clock.timer_fd);
+    return 1;
+  }
+  if (!clock.callback) return 1;
+  // Like this phone, report frames shown late around each display mode change.
+  if (clock.rate && rate != clock.rate) late_frames += 3;
+  clock.rate = rate;
+  frame_cost = cost;
   --clock.remaining;
   ++clock.delivered;
-  clock.callback(1000000000L + clock.delivered * 1000000000L / 60, clock.data);
-  if (!clock.remaining) {
-    clock.finished = true;
-    return 0;
+  clock.presentation = presentation;
+  simulated_now = std::max(simulated_now.load(), callback_time);
+  if (callbacks % every) {
+    // A throttled vsync passes without a callback.
+    wake(fd);
+  } else {
+    AChoreographerFrameCallbackData vsync{presentation, period};
+    std::exchange(clock.callback, nullptr)(&vsync, clock.data);
   }
+  if (!clock.remaining) clock.finished = true;
   return 1;
 }
 
@@ -128,6 +232,26 @@ common::Result<MeshId> create_mesh(Renderer& r, std::span<const Vertex>,
 void clear_instances(Renderer&) {}
 
 void set_transform(Renderer&, Mat4) {}
+
+void set_present_time(Renderer&, std::int64_t nanoseconds) {
+  auto previous = present_time.exchange(nanoseconds);
+  int64_t cost =
+      spike_every && ++presents % spike_every == 0 ? spike_cost.load() : simulated_cost();
+  if (warmup_frames) --warmup_frames;
+  settle_excess = settle_excess * .95f;
+  if (!previous) return;
+  auto spacing = nanoseconds - previous;
+  // Like this phone's GPU, consecutive frames overlap enough to sustain a budget
+  // 1.2 times below their measured cost. A frame is also late if it started too
+  // close to its slot to be ready two refreshes before it, like this phone's.
+  int64_t refresh = frame_clock && frame_clock->rate ? 1000000000 / frame_clock->rate : 0;
+  if (spacing * 6 / 5 < cost || nanoseconds + 2000000 - simulated_now < 2 * refresh + cost)
+    ++late_frames;
+  if (present_spacing && std::llabs(spacing - present_spacing) > 1000) ++uneven_presents;
+  present_spacing = spacing;
+}
+
+unsigned take_late_frames(Renderer&) { return late_frames.exchange(0); }
 
 void add(Renderer&, Shape, Mat4, Color, float, float, float, float) {}
 
@@ -196,7 +320,7 @@ common::Result<void> wait_frame(Renderer&) {
 }
 
 RenderStats get_stats(const Renderer& r) {
-  return {r.width, r.height, r.width, r.height, 4, 16384, 0, 0};
+  return {r.width, r.height, r.width, r.height, 4, 16384, 0, measured_cost()};
 }
 
 std::string_view get_device(const Renderer&) { return "runtime-fault-test"; }
@@ -204,9 +328,9 @@ std::string_view get_device(const Renderer&) { return "runtime-fault-test"; }
 
 // Simulate a display which stops delivering vsync. A required redraw must
 // recover or fail without depending on another Choreographer callback.
-extern "C" void __wrap_AChoreographer_postFrameCallback64(AChoreographer*,
-                                                          AChoreographer_frameCallback64 callback,
-                                                          void* data) {
+extern "C" void __wrap_AChoreographer_postVsyncCallback(AChoreographer*,
+                                                        AChoreographer_vsyncCallback callback,
+                                                        void* data) {
   ++callbacks;
   if (frame_clock && frame_clock->remaining) {
     frame_clock->callback = callback;
@@ -214,9 +338,32 @@ extern "C" void __wrap_AChoreographer_postFrameCallback64(AChoreographer*,
     if (ALooper_addFd(ALooper_forThread(), frame_clock->fd, ALOOPER_POLL_CALLBACK,
                       ALOOPER_EVENT_INPUT, deliver_frame, frame_clock) != 1)
       std::abort();
-    const std::uint64_t one = 1;
-    if (write(frame_clock->fd, &one, sizeof(one)) != sizeof(one)) std::abort();
+    wake(frame_clock->fd);
   }
+}
+
+// The frame timer is an eventfd that the simulated display fires at its target.
+extern "C" int __wrap_timerfd_create(int, int) { return eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); }
+
+extern "C" int __wrap_timerfd_settime(int fd, int, const itimerspec* value, itimerspec*) {
+  if (frame_clock) {
+    frame_clock->timer_fd = fd;
+    frame_clock->timer = int64_t(value->it_value.tv_sec) * 1000000000 + value->it_value.tv_nsec;
+    wake(frame_clock->fd);
+  }
+  return 0;
+}
+
+extern "C" int __real_clock_gettime(clockid_t, timespec*);
+
+// While the display is simulated, CLOCK_MONOTONIC follows its time.
+extern "C" int __wrap_clock_gettime(clockid_t id, timespec* time) {
+  int result = __real_clock_gettime(id, time);
+  int64_t simulated = simulated_now;
+  if (!result && id == CLOCK_MONOTONIC && frame_clock &&
+      simulated > int64_t(time->tv_sec) * 1000000000 + time->tv_nsec)
+    *time = {time_t(simulated / 1000000000), long(simulated % 1000000000)};
+  return result;
 }
 
 namespace {
@@ -323,24 +470,91 @@ Result<void> check_idle_resize(const char* directory) {
   return {};
 }
 
+// Ten seconds of vsync animate on an exact grid of the display's refreshes. A fast
+// GPU draws every refresh, including while Android runs a 120 Hz display at 60 Hz
+// for two seconds. A GPU too slow for 120 Hz settles on every other refresh, at
+// 60 fps, and returns to 120 fps once its frames fit again. A slower GPU settles
+// on every third refresh, at 40 fps, even with Choreographer calling back only on
+// every other vsync. A GPU that starts slowly and slows down at 60 fps still
+// finds and keeps 120 fps, occasional costly frames at 60 fps start earlier
+// instead of lowering the rate, and a GPU time that settles from a slow start
+// keeps 120 fps throughout.
 Result<void> check_animation_clock(const char* directory) {
-  for (double start : {65536., 262144., 524288.}) {
-    common::Owner<FrameClock> clock(new FrameClock{eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)});
+  struct Run {
+    std::vector<Mode> modes;
+    double start;
+  };
+
+  constexpr int64_t kSlow = 12000000, kFast = 5000000, kSlower = 24000000, kFaster = 7000000,
+                    kUneven = 13000000, kSettling = 7500000;
+  for (const auto& [modes, start] :
+       {Run{{{600, 60, 0}}, 65536.}, Run{{{600, 60, 0}}, 262144.}, Run{{{600, 60, 0}}, 524288.},
+        Run{{{1200, 120, 0}}, 65536.}, Run{{{480, 120, 0}, {120, 60, 0}, {480, 120, 0}}, 65536.},
+        Run{{{1200, 120, kSlow}}, 65536.}, Run{{{360, 120, kSlow}, {840, 120, kFast}}, 65536.},
+        Run{{{1200, 120, kSlower, 2}}, 65536.}, Run{{{1200, 120, kFaster, 1, 40, 1.6f}}, 65536.},
+        Run{{{1200, 120, kUneven, 1, 0, 1, 20, 19000000}}, 65536.},
+        Run{{{1200, 120, kSettling, 1, 0, 1, 0, 0, 2}}, 65536.}}) {
+    unsigned callbacks = 0;
+    bool fast = true;
+    for (auto mode : modes) {
+      callbacks += mode.callbacks;
+      fast = fast && !mode.cost;
+    }
+    timespec now;
+    __real_clock_gettime(CLOCK_MONOTONIC, &now);
+    common::Owner<FrameClock> clock(new FrameClock{eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK), modes});
+    clock->remaining = callbacks;
+    clock->presentation = simulated_now = int64_t(now.tv_sec + 1) * 1000000000 + now.tv_nsec;
     CHECK(clock->fd >= 0, "Cannot create the test frame clock");
     frame_clock = clock.get();
+    frame_cost = 0;
+    warmup_frames = modes.front().warmup;
+    settle_excess = modes.front().settle;
+    presents = 0;
+    present_time = present_spacing = 0;
+    late_frames = uneven_presents = 0;
     {
       auto runtime = create_runtime(directory, SessionState{.count = 0, .time = start});
       CHECK(runtime, "Cannot restore the long-running animation");
       auto& r = **runtime;
       CHECK(set_surface(r, nullptr, 400, 720) && redraw(r), "Cannot attach clock test scene");
+      auto frames = get_state(r).frames;
       set_resumed(r, true);
       auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
       while (!clock->finished && std::chrono::steady_clock::now() < deadline) usleep(1000);
       CHECK(clock->finished, "Synthetic animation frames did not finish");
+      unsigned drawn = get_state(r).frames - frames;
+      if (fast) {
+        // Every vsync draws a frame, after a pipeline latency of up to three
+        // refreshes. Only display mode changes may change the spacing of
+        // requested times, and pacing may skip a refresh as it re-anchors.
+        CHECK(drawn + 3 >= callbacks && drawn <= callbacks &&
+                  uneven_presents <= 2 * (modes.size() - 1) &&
+                  present_spacing == 1000000000 / modes.back().rate,
+              "Animation did not draw every vsync evenly");
+      } else if (modes.back().cost == kSlow) {
+        CHECK(drawn > 600 && drawn < 630 && present_spacing == 1000000000 / 60,
+              "A GPU too slow for 120 Hz did not settle at 60 fps");
+      } else if (modes.back().cost == kSlower) {
+        CHECK(drawn > 400 && drawn < 440 && present_spacing == 3 * (1000000000 / 120),
+              "A GPU too slow for 60 Hz did not settle at 40 fps");
+      } else if (modes.back().cost == kSettling) {
+        CHECK(drawn + 3 >= callbacks && present_spacing == 1000000000 / 120,
+              "A GPU time settling from its start left 120 fps");
+      } else if (modes.back().cost == kUneven) {
+        CHECK(drawn > 590 && drawn < 640 && present_spacing == 1000000000 / 60,
+              "Occasional costly frames lowered the rate below 60 fps");
+      } else if (modes.back().cost == kFaster) {
+        CHECK(drawn > 1100 && present_spacing == 1000000000 / 120,
+              "A GPU slowed by warm-up and lower clocks did not keep 120 fps");
+      } else {
+        CHECK(drawn > 900 && drawn < 1100 && present_spacing == 1000000000 / 120,
+              "A GPU that became fast enough did not return to 120 fps");
+      }
       activate(r, Control::kPause);
       auto state = capture_state(r);
-      CHECK(state && state->paused && std::abs(state->time - start - 10.) < .00001,
-            "Long-running animation drifted or froze at 60 Hz");
+      CHECK(state && state->paused && std::abs(state->time - start - 10.) < .07,
+            "Long-running animation drifted or froze");
       auto restored = decode_state(encode_state(*state));
       CHECK(restored && restored->time == state->time,
             "Saving animation time lost sub-frame precision");
@@ -348,6 +562,7 @@ Result<void> check_animation_clock(const char* directory) {
             "Paused animation advanced during redraw");
     }
     frame_clock = nullptr;
+    frame_cost = 0;
   }
   return {};
 }

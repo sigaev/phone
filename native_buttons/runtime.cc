@@ -6,6 +6,7 @@
 #include <android/native_window.h>
 #include <pthread.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -13,6 +14,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <new>
 #include <utility>
@@ -32,6 +34,35 @@ constexpr int kLifecycleTimeoutSeconds = 3;
 constexpr int kSurfaceCheckMilliseconds = 100;
 constexpr char kRedrawTimeoutError[] = "Timed out waiting for the window to redraw";
 constexpr char kSnapshotTimeoutError[] = "Timed out waiting for the Activity state";
+// Frame pacing, in CLOCK_MONOTONIC nanoseconds. The display stays at its peak
+// refresh rate. Android throttles an app's Choreographer to the rate the app
+// presents at, so Choreographer only describes the upcoming vsyncs: a timer
+// starts each frame just in time for its slot on an exact grid N refreshes
+// apart, emulating the peak rate divided by N. Timeline estimates vary slightly,
+// so slots and requested presentation times allow this slack.
+constexpr int64_t kVsyncSlack = 2000000;
+// Beyond the average CPU and GPU time, a frame starts at least this early. Each
+// late frame adds kLeadStep, up to a refresh, since GPU time varies; the lead
+// decays by kLeadDecay per frame on time.
+constexpr int64_t kCostMargin = 2000000, kLeadStep = 2000000, kLeadDecay = 20000;
+// Down to 15 fps at 120 Hz.
+constexpr unsigned kMaximumInterval = 8;
+// N is the smallest interval whose budget, allowing kOverlap for the GPU
+// overlapping consecutive frames, fits the lowest frame cost measured since the
+// surface or detail level changed. Each change starts at the peak rate, where GPU
+// clocks run highest, and measures after kMeasureFrames, or up to twice as long
+// while the cost is still falling from the renderer's startup. kLateLimit missed
+// deadlines within kPacingWindow frames, once the lead is a full refresh, raise a
+// floor under N by one, so a few misses alone are tolerated. The floor relaxes by one after each
+// hold without misses. GPU clocks fall at slower rates, inflating the cost, so after a hold a
+// faster rate within kRetryFit of the cost is measured again. Slowing down within
+// kUnstable of speeding up doubles the hold.
+constexpr float kOverlap = 1.2f, kRetryFit = 1.25f;
+constexpr unsigned kPacingWindow = 120, kLateLimit = 4, kMeasureFrames = 30;
+constexpr int64_t kFirstHold = 1000000000, kLastHold = 32000000000, kUnstable = 5000000000;
+// Late reports lag the display, and display mode changes shift presentation
+// times, so both ignore this many frames.
+constexpr unsigned kSettleFrames = 8;
 
 [[noreturn]] void stop_unresponsive_worker(const char* operation) {
   __android_log_print(ANDROID_LOG_FATAL, "native_buttons",
@@ -63,6 +94,7 @@ enum class CommandKind {
   kPinch,
   kTouchSlop,
   kDensity,
+  kPeakRefreshRate,
   kStop
 };
 
@@ -84,7 +116,7 @@ void drain_fd(int fd) {
   uint64_t value;
   while (read(fd, &value, sizeof(value)) < 0 && errno == EINTR) {}
 }
-}
+}  // namespace
 
 struct Runtime {
   pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -115,7 +147,16 @@ struct Runtime {
   unsigned redraw_sequence = 0;
   bool dragging = false;
   float last_x = 0, down_x = 0, down_y = 0, touch_slop = 8, density = 1, fps = 0;
-  int64_t last_frame = 0;
+  // Frame pacing. The vsync model holds the expected presentation of the next
+  // vsync, the current and fastest refresh periods, and how long before its
+  // presentation a frame must be ready. Frames are drawn for next_slot.
+  int frame_timer = -1;
+  int64_t peak_period = 0, fastest_vsync = 0, vsync_period = 0, vsync_origin = 0, vsync_latch = 0,
+          last_frame = 0, next_slot = 0;
+  int64_t floor_until = 0, retry_at = 0, faster_at = 0, hold = kFirstHold, lead = kCostMargin;
+  float cpu_ms = 0, best_cost = 0, previous_cost = 0;
+  unsigned interval = 1, floor = 1, window_frames = 0, late_frames = 0, settling = 0, measuring = 0,
+           measured = 0;
   double fps_time = 0;
   unsigned fps_frames = 0;
 };
@@ -139,11 +180,153 @@ void publish(Runtime& r) {
   signal_fd(r.notifications_fd);
 }
 
+void arm_frame(Runtime& r);
+
 void reset_timing(Runtime& r) {
   r.last_frame = 0;
+  r.next_slot = 0;
+  arm_frame(r);
   r.fps = 0;
   r.fps_time = 0;
   r.fps_frames = 0;
+}
+
+int64_t monotonic_nanoseconds() {
+  timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return int64_t(now.tv_sec) * 1000000000 + now.tv_nsec;
+}
+
+int64_t fastest_period(const Runtime& r) { return r.peak_period ? r.peak_period : r.fastest_vsync; }
+
+int64_t period(const Runtime& r, unsigned interval) {
+  return std::max<int64_t>(interval * fastest_period(r), r.vsync_period);
+}
+
+// Ask Android for the peak rate as fixed-rate content, so it keeps the display there.
+void request_frame_rate(Runtime& r) {
+  if (r.window && fastest_period(r))
+    ANativeWindow_setFrameRate(r.window->handle, 1e9f / fastest_period(r),
+                               ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+}
+
+// CPU and GPU work overlap across frames, so the slower one limits the rate.
+float frame_cost(const Runtime& r) {
+  return std::max(r.cpu_ms, gpu::get_stats(*r.renderer).gpu_ms) * 1e6f;
+}
+
+// From a frame's start to its presentation: the CPU and GPU work, which can run
+// back to back, and the display's own latency.
+int64_t frame_latency(const Runtime& r) {
+  return r.vsync_latch + r.lead + int64_t((r.cpu_ms + gpu::get_stats(*r.renderer).gpu_ms) * 1e6f);
+}
+
+// The first predicted vsync at or after the given time.
+int64_t vsync_after(const Runtime& r, int64_t time) {
+  int64_t refreshes = (time - r.vsync_origin + r.vsync_period - 1) / r.vsync_period;
+  if (time < r.vsync_origin) refreshes = -((r.vsync_origin - time) / r.vsync_period);
+  return r.vsync_origin + refreshes * r.vsync_period;
+}
+
+void change_interval(Runtime& r, unsigned interval) {
+  r.interval = interval;
+  r.window_frames = r.late_frames = 0;
+  r.settling = kSettleFrames;
+}
+
+// Each surface and detail level starts at the peak rate and measures its cost.
+void reset_pacing(Runtime& r) {
+  change_interval(r, 1);
+  r.floor = 1;
+  r.best_cost = 0;
+  r.measuring = kMeasureFrames;
+  r.measured = 0;
+  r.hold = kFirstHold;
+  r.faster_at = r.floor_until = r.retry_at = 0;
+  r.lead = kCostMargin;
+  request_frame_rate(r);
+}
+
+void pace(Runtime& r, int64_t slot, unsigned late) {
+  // Late frames first start earlier; only lateness with a full refresh of lead
+  // counts toward a slower rate.
+  int64_t full_lead = std::max(r.vsync_period, kCostMargin);
+  if (r.settling) {
+    --r.settling;
+  } else if (!late) {
+    r.lead = std::max(kCostMargin, r.lead - kLeadDecay);
+  } else if (r.lead < full_lead) {
+    r.lead = std::min(full_lead, r.lead + kLeadStep * late);
+  } else {
+    r.late_frames += late;
+  }
+  float cost = frame_cost(r);
+  if (r.measuring) {
+    bool falling = cost < .99f * r.previous_cost && r.measured < 2 * kMeasureFrames;
+    ++r.measured;
+    if (r.measuring > 1 || !falling) --r.measuring;
+    if (!r.measuring) r.best_cost = cost;
+  } else {
+    r.best_cost = std::min(r.best_cost, cost);
+  }
+  r.previous_cost = cost;
+  if (r.late_frames >= kLateLimit) {
+    r.floor = std::min(r.interval + 1, kMaximumInterval);
+    r.window_frames = r.late_frames = 0;
+  } else if (++r.window_frames == kPacingWindow) {
+    r.window_frames = r.late_frames = 0;
+  }
+  if (r.floor > r.interval) r.floor_until = 0;
+  else if (r.floor > 1 && !r.late_frames && slot >= r.floor_until) --r.floor;
+  unsigned interval = r.interval;
+  if (!r.measuring) {
+    interval = 1;
+    while (interval < kMaximumInterval && r.best_cost > kOverlap * period(r, interval)) ++interval;
+  }
+  interval = std::max(interval, r.floor);
+  if (interval == r.interval && interval > 1 && r.floor < interval && !r.measuring &&
+      !r.late_frames && slot >= r.retry_at &&
+      r.best_cost <= kRetryFit * kOverlap * period(r, interval - 1)) {
+    --interval;
+    r.measuring = kMeasureFrames;
+    r.measured = 0;
+  }
+  if (interval < r.interval) {
+    r.faster_at = slot;
+  } else if (interval > r.interval) {
+    r.hold = r.faster_at && slot - r.faster_at < kUnstable ? std::min(r.hold * 2, kLastHold)
+                                                           : kFirstHold;
+    r.faster_at = 0;
+    r.retry_at = slot + r.hold;
+    if (!r.floor_until) r.floor_until = slot + r.hold;
+    // An interrupted measurement restarts at the slower rate.
+    if (r.measuring) {
+      r.measuring = kMeasureFrames;
+      r.measured = 0;
+    }
+  }
+  if (interval != r.interval) change_interval(r, interval);
+}
+
+bool animating(const Runtime& r) {
+  return !r.stopping && r.scene && r.state.error.empty() && r.resumed && !r.state.paused;
+}
+
+// Start the timer for the next frame, just early enough for its slot.
+void arm_frame(Runtime& r) {
+  itimerspec timer{};
+  if (animating(r) && r.vsync_period) {
+    int64_t latency = frame_latency(r), now = monotonic_nanoseconds();
+    if (!r.next_slot) r.next_slot = vsync_after(r, now + latency);
+    int64_t start = std::max(r.next_slot - latency, now + 1);
+    timer.it_value = {time_t(start / 1000000000), long(start % 1000000000)};
+  }
+  timerfd_settime(r.frame_timer, TFD_TIMER_ABSTIME, &timer, nullptr);
+}
+
+int64_t expected_presentation(const AChoreographerFrameCallbackData* vsync, size_t timeline) {
+  return AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos(vsync,
+                                                                                       timeline);
 }
 
 void persist(Runtime& r) {
@@ -166,6 +349,7 @@ void apply_control(Runtime& r, Control control) {
       break;
     case Control::kQuality:
       r.state.maximum = !r.state.maximum;
+      reset_pacing(r);
       break;
     case Control::kBird:
       r.state.bird = r.state.bird == Bird::kFlamingo ? Bird::kPelican : Bird::kFlamingo;
@@ -261,37 +445,79 @@ bool needs_frame(const Runtime& r) {
 
 void schedule_frame(Runtime& r);
 
-void on_frame(int64_t nanos, void* data) {
+// Choreographer describes the upcoming vsyncs. Animation frames are drawn by the
+// frame timer; other redraws are drawn here.
+void on_frame(const AChoreographerFrameCallbackData* vsync, void* data) {
   auto& r = *static_cast<Runtime*>(data);
   r.frame_pending = false;
   if (!needs_frame(r)) return;
-  bool animating = r.resumed && !r.state.paused;
-  if (animating) {
-    double delta = r.last_frame ? double(nanos - r.last_frame) / 1e9 : 1. / 60;
-    r.last_frame = nanos;
-    r.state.time += std::clamp(delta, 0., .1);
-    r.fps_time += delta;
-  } else {
-    reset_timing(r);
-  }
-  unsigned previous_frames = r.state.frames;
-  record_result(r, draw(r, false));
-  if (animating) {
-    r.fps_frames += r.state.frames != previous_frames;
-    if (r.fps_time > .5) {
-      r.fps = r.fps_frames / r.fps_time;
-      r.fps_frames = 0;
-      r.fps_time = 0;
+  size_t timelines = AChoreographerFrameCallbackData_getFrameTimelinesLength(vsync);
+  r.vsync_origin = expected_presentation(vsync, 0);
+  r.vsync_latch =
+      r.vsync_origin - AChoreographerFrameCallbackData_getFrameTimelineDeadlineNanos(vsync, 0);
+  // Consecutive frame timelines are one refresh of the current display mode apart.
+  if (timelines > 1) {
+    int64_t refresh = expected_presentation(vsync, 1) - r.vsync_origin;
+    if (std::llabs(refresh - r.vsync_period) > kVsyncSlack) {
+      r.vsync_period = refresh;
+      r.next_slot = 0;
+      r.settling = std::max(r.settling, kSettleFrames);
+    }
+    if (!r.fastest_vsync || refresh < r.fastest_vsync - kVsyncSlack) {
+      r.fastest_vsync = refresh;
+      if (!r.peak_period) request_frame_rate(r);
     }
   }
-  publish(r);
+  if (animating(r) && r.vsync_period) {
+    if (!r.next_slot) arm_frame(r);
+  } else {
+    reset_timing(r);
+    record_result(r, draw(r, false));
+    publish(r);
+  }
   schedule_frame(r);
+}
+
+int on_frame_timer(int fd, int, void* data) {
+  auto& r = *static_cast<Runtime*>(data);
+  drain_fd(fd);
+  if (!animating(r) || !r.next_slot) return 1;
+  int64_t step = period(r, r.interval);
+  int64_t slot = r.next_slot, started = monotonic_nanoseconds();
+  // A frame that cannot even be recorded before its deadline takes the next
+  // reachable slot on the grid. Otherwise it is drawn, and display timing
+  // reports whether it was late.
+  unsigned missed = 0;
+  while (slot - r.vsync_latch - int64_t(r.cpu_ms * 1e6f) < started) {
+    slot += step;
+    missed = 1;
+  }
+  gpu::set_present_time(*r.renderer, slot - kVsyncSlack);
+  double delta = double(r.last_frame ? slot - r.last_frame : step) / 1e9;
+  r.last_frame = slot;
+  r.state.time += std::clamp(delta, 0., .1);
+  r.fps_time += delta;
+  unsigned previous_frames = r.state.frames;
+  record_result(r, draw(r, false));
+  float cpu_ms = (monotonic_nanoseconds() - started) / 1e6f;
+  r.cpu_ms = r.cpu_ms ? r.cpu_ms * .85f + cpu_ms * .15f : cpu_ms;
+  r.fps_frames += r.state.frames != previous_frames;
+  if (r.fps_time > .5) {
+    r.fps = r.fps_frames / r.fps_time;
+    r.fps_frames = 0;
+    r.fps_time = 0;
+  }
+  if (r.renderer) pace(r, slot, missed + gpu::take_late_frames(*r.renderer));
+  r.next_slot = vsync_after(r, slot + period(r, r.interval) - kVsyncSlack);
+  publish(r);
+  arm_frame(r);
+  return 1;
 }
 
 void schedule_frame(Runtime& r) {
   if (needs_frame(r) && !r.frame_pending) {
     r.frame_pending = true;
-    AChoreographer_postFrameCallback64(r.choreographer, on_frame, &r);
+    AChoreographer_postVsyncCallback(r.choreographer, on_frame, &r);
   }
 }
 
@@ -349,9 +575,8 @@ Result<void> create_surface(Runtime& r, Command& command) {
   auto scene = create_scene(*r.renderer);
   if (!scene) return std::unexpected(scene.error());
   r.scene = std::move(*scene);
-  if (r.window)
-    ANativeWindow_setFrameRate(r.window->handle, 60.f,
-                               ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT);
+  r.fastest_vsync = r.vsync_period = 0;
+  reset_pacing(r);
   return draw(r, false);
 }
 
@@ -433,6 +658,10 @@ int process_commands(int, int, void* data) {
         r.dragging = false;
         r.dirty_visual = true;
         break;
+      case CommandKind::kPeakRefreshRate:
+        r.peak_period = int64_t(1e9 / command.x);
+        reset_pacing(r);
+        break;
       case CommandKind::kStop:
         persist(r);
         release_surface(r);
@@ -468,7 +697,9 @@ void* worker(void* data) {
   r.choreographer = AChoreographer_getInstance();
   if (!looper || !r.choreographer ||
       ALooper_addFd(looper, r.commands_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT,
-                    process_commands, &r) != 1) {
+                    process_commands, &r) != 1 ||
+      ALooper_addFd(looper, r.frame_timer, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT,
+                    on_frame_timer, &r) != 1) {
     r.state.error = "Cannot initialize the rendering looper";
     r.stopping = true;
   }
@@ -491,12 +722,16 @@ void* worker(void* data) {
       check_surface(r);
     }
   }
-  if (looper) ALooper_removeFd(looper, r.commands_fd);
+  if (looper) {
+    ALooper_removeFd(looper, r.commands_fd);
+    ALooper_removeFd(looper, r.frame_timer);
+  }
   pthread_mutex_lock(&r.mutex);
   r.exited = true;
   pthread_cond_broadcast(&r.completed_condition);
   // Last access to Runtime on this detached thread. Its owner may free it
-  // after acquiring the mutex and observing exited, without joining TLS cleanup.
+  // after acquiring the mutex and observing exited, without joining TLS
+  // cleanup.
   pthread_mutex_unlock(&r.mutex);
   return nullptr;
 }
@@ -547,7 +782,7 @@ Result<void> synchronize(Runtime& r, CommandKind kind) {
   if (!error.empty()) return std::unexpected(Error{std::move(error)});
   return {};
 }
-}
+}  // namespace
 
 Result<Owner<Runtime>> create_runtime(const char* directory, SessionState restored) {
   if (restored.count < -1 || restored.count > 999999 || !std::isfinite(restored.yaw) ||
@@ -572,7 +807,8 @@ Result<Owner<Runtime>> create_runtime(const char* directory, SessionState restor
   runtime->published = runtime->state;
   runtime->commands_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   runtime->notifications_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  if (runtime->commands_fd < 0 || runtime->notifications_fd < 0)
+  runtime->frame_timer = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+  if (runtime->commands_fd < 0 || runtime->notifications_fd < 0 || runtime->frame_timer < 0)
     return std::unexpected(Error{"Cannot create runtime notification channels"});
   pthread_attr_t thread_attributes;
   if (pthread_attr_init(&thread_attributes) != 0)
@@ -590,6 +826,7 @@ void destroy(Runtime* runtime) noexcept {
   if (runtime->started) { (void)synchronize(*runtime, CommandKind::kStop); }
   if (runtime->commands_fd >= 0) close(runtime->commands_fd);
   if (runtime->notifications_fd >= 0) close(runtime->notifications_fd);
+  if (runtime->frame_timer >= 0) close(runtime->frame_timer);
   if (runtime->condition_initialized) pthread_cond_destroy(&runtime->completed_condition);
   pthread_mutex_destroy(&runtime->mutex);
   delete runtime;
@@ -666,6 +903,13 @@ void set_density(Runtime& r, float pixels_per_dp) {
   enqueue(r, std::move(command));
 }
 
+void set_peak_refresh_rate(Runtime& r, float hertz) {
+  if (!std::isfinite(hertz) || hertz < 1) return;
+  Command command{CommandKind::kPeakRefreshRate};
+  command.x = hertz;
+  enqueue(r, std::move(command));
+}
+
 void focus_control(Runtime& r, Control control) {
   Command command{CommandKind::kFocus};
   command.value = static_cast<int>(control);
@@ -694,4 +938,4 @@ Result<RuntimeState> capture_state(Runtime& r) {
 int notification_fd(const Runtime& r) { return r.notifications_fd; }
 
 void acknowledge_notifications(Runtime& r) { drain_fd(r.notifications_fd); }
-}
+}  // namespace native_buttons
