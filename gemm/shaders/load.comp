@@ -1,0 +1,117 @@
+#version 460
+// Load throughput by access kind. Every workgroup rereads its own small region,
+// so global loads hit the L1 cache. UNROLL independent loads per iteration keep
+// many requests in flight; their sum keeps the loads alive.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Parameters {
+  uint iterations;
+  uint region;  // elements per workgroup region, a power of two
+};
+
+layout(constant_id = 1) const uint kIterations = 256;
+#if defined(CONSTANT_ITERATIONS)
+#define ITERATIONS kIterations
+#else
+#define ITERATIONS iterations
+#endif
+#if defined(TEXEL_VEC4)
+layout(binding = 0) uniform usamplerBuffer texels;
+#elif defined(IMAGE_VEC4) || defined(IMAGE_VEC2) || defined(IMAGE_SCALAR) || \
+    defined(IMAGE_VEC4_ROWS)
+// 1 KiB rows of 16-, 8-, or 4-byte texels.
+layout(binding = 0) uniform usampler2D image;
+#else
+layout(std430, binding = 0) readonly buffer Source { vec4 source[]; };
+
+layout(std430, binding = 0) readonly buffer Pairs { vec2 pairs[]; };
+
+layout(std430, binding = 0) readonly buffer Scalars { float scalars[]; };
+#endif
+#if defined(IMAGE_VEC2)
+const uint kRowTexels = 128;
+#elif defined(IMAGE_SCALAR)
+const uint kRowTexels = 256;
+#else
+const uint kRowTexels = 64;
+#endif
+layout(std430, binding = 1) writeonly buffer Sink { vec4 sink[]; };
+
+const uint kUnroll = 8;
+#if defined(SHARED_VEC4) || defined(SHARED_SCALAR) || defined(COOP_SHARED)
+shared vec4 tile[1024];
+shared float scalar_tile[4096];
+#endif
+
+void main() {
+  uint local = gl_LocalInvocationID.x, lane = gl_SubgroupInvocationID;
+  uint base = gl_WorkGroupID.x * region;
+  uint mask = region - 1;
+  vec4 total = vec4(0);
+#if defined(SHARED_VEC4) || defined(SHARED_SCALAR) || defined(COOP_SHARED)
+  for (uint i = local; i < 1024; i += 256) tile[i] = source[base + (i & mask)];
+  for (uint i = local; i < 4096; i += 256)
+    scalar_tile[i] = scalars[4 * base + (i & (4 * mask + 3))];
+  barrier();
+#endif
+  for (uint n = 0; n < ITERATIONS; ++n) {
+    uint offset = n * 64;
+    for (uint j = 0; j < kUnroll; ++j) {
+      uint index = (offset + j * 256 + local) & mask;
+#if defined(TEXEL_VEC4)
+      total += uintBitsToFloat(texelFetch(texels, int(base + index)));
+#elif defined(IMAGE_VEC4) || defined(IMAGE_VEC2) || defined(IMAGE_SCALAR)
+      // Consecutive lanes read consecutive texels.
+      uint texel = base * 16 / (1024 / kRowTexels) + index;
+      total += uintBitsToFloat(texelFetch(image, ivec2(texel % kRowTexels, texel / kRowTexels), 0));
+#elif defined(IMAGE_VEC4_ROWS)
+      // Each lane reads its own image row, like the kernels' fetches of B: a
+      // workgroup rereads 16 texels of each of 16 rows.
+      total += uintBitsToFloat(
+          texelFetch(image, ivec2((n * 8 + j) & 15, (gl_WorkGroupID.x * 16 + lane) & 16383), 0));
+#elif defined(GLOBAL_VEC4)
+      total += source[base + index];
+#elif defined(GLOBAL_VEC4_ROWS)
+      // Each lane reads its own 1 KiB row: 16 cache lines per subgroup load.
+      total += source[(gl_WorkGroupID.x * 16 + lane) * 64 % (1u << 22) + ((n * 8 + j) & 15)];
+#elif defined(GLOBAL_SCALAR)
+      // Lanes 16 bytes apart: four lanes per 64-byte cache line.
+      total.x += scalars[4 * base + (index * 4 & (4 * mask + 3))];
+#elif defined(GLOBAL_SCALAR_LINE)
+      // Consecutive lanes: a subgroup reads one 64-byte cache line.
+      total.x += scalars[4 * base + (index & (4 * mask + 3))];
+#elif defined(GLOBAL_VEC2)
+      // Consecutive lanes: a subgroup reads two cache lines.
+      total.xy += pairs[2 * base + (index & (2 * mask + 1))];
+#elif defined(GLOBAL_VEC2_HALF_LINES)
+      // Groups of four consecutive lanes read the first half of four different
+      // cache lines, like the int8 kernel's loads of A.
+      total.xy += pairs[2 * base + ((index / 4 * 8 + index % 4) & (2 * mask + 1))];
+#elif defined(GLOBAL_UNIFORM)
+      // The same address in every lane of the subgroup.
+      total += source[base + ((offset + j * 16 + gl_SubgroupID * 64) & mask)];
+#elif defined(SHARED_VEC4)
+      total += tile[index & 1023];
+#elif defined(SHARED_SCALAR)
+      total.x += scalar_tile[(index * 4) & 4095];
+#endif
+    }
+#if defined(COOP_GLOBAL) || defined(COOP_SHARED)
+    // One 16x16 fp32 matrix per subgroup per iteration: 1 KiB.
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> m;
+    uint start = (offset * 4 + gl_SubgroupID * 256) & (4 * mask) & ~255u;
+#if defined(COOP_GLOBAL)
+    coopMatLoad(m, scalars, 4 * base + start, 16, gl_CooperativeMatrixLayoutRowMajor);
+#else
+    coopMatLoad(m, scalar_tile, start & 3840, 16, gl_CooperativeMatrixLayoutRowMajor);
+#endif
+    for (int e = 0; e < m.length(); ++e) total.x += m[e];
+#endif
+  }
+  if (total.x == -1.25e-30) sink[gl_GlobalInvocationID.x] = total;
+}

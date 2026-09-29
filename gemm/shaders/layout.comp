@@ -1,0 +1,22 @@
+#version 460
+// Reveals how the driver distributes a cooperative matrix over a subgroup: the
+// host fills a row-major matrix with each element's index (int8 in two passes,
+// low 7 bits and high bits), and each lane writes its elements in order.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 16) in;
+
+layout(std430, binding = 0) readonly buffer Values { TYPE values[]; };
+
+layout(std430, binding = 1) writeonly buffer Lanes { uint lanes[]; };
+
+void main() {
+  uint lane = gl_SubgroupInvocationID;
+  coopmat<TYPE, gl_ScopeSubgroup, ROWS, COLS, USE> m;
+  coopMatLoad(m, values, 0, COLS, gl_CooperativeMatrixLayoutRowMajor);
+  for (int e = 0; e < m.length(); ++e) lanes[lane * m.length() + e] = uint(int(m[e]));
+  if (lane == 0) lanes[16 * m.length()] = m.length();
+}

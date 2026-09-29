@@ -1,16 +1,22 @@
 # Android Bazel workspace
 
 The [Native Buttons app](native_buttons/README.md) lives in `native_buttons/`,
-and the [Sudoku app](sudoku/README.md) in `sudoku/`. Shared code and build
-infrastructure stay outside app directories:
+the [Sudoku app](sudoku/README.md) in `sudoku/`, and the
+[GEMM benchmark](gemm/README.md), which measures this phone's GPU with Vulkan
+compute, in `gemm/`. Shared code and build infrastructure stay outside app
+directories:
 
 - `common/` provides the `Owner` helper that destroys opaque objects, `Result`
   and `Error` for `std::expected` error handling, and Android runtime support.
 - `common/gpu/` provides the shared Vulkan 1.4 renderer, mesh primitives,
   shadows, HDR, bloom, compute particles, and GPU text drawing. Its overlay
   mode draws only multisampled 2D shapes and text, for flat interfaces.
-- `tools/spirv.bzl` compiles and validates optimized SPIR-V with the pinned NDK
-  during the Bazel build. No shader compiler is linked into the apps.
+- `tools/spirv.bzl` compiles and validates SPIR-V during the Bazel build:
+  `spirv_shader` with the pinned NDK's `glslc` and `spirv-val`, and
+  `glslang_shader`, for the GEMM benchmark's Vulkan 1.4 cooperative matrices
+  and integer dot products, with Khronos's glslang 16.6.0 (fetched with a
+  SHA-256 and built by `tools/glslang.BUILD.bazel`) and SPIRV-Tools 2026.1 from
+  the Bazel Central Registry. No shader compiler is linked into the apps.
 - `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform, which
   `.bazelrc` selects for every build.
 - `MODULE.bazel`, `.bazelrc`, and `tools/` configure the toolchains.
@@ -36,11 +42,11 @@ infrastructure stay outside app directories:
   and exposed as `@stb//:stb_truetype`. No third-party sources are vendored.
 - `tools/libcxx.bzl` fetches libc++ sources from the LLVM revision recorded in
   NDK r29's `clang_source_info.md`, with a SHA-256 for every file. The
-  `tools/libcxx.BUILD.bazel` overlay compiles `chrono`, `new`, `new_handler`,
-  `new_helpers`, `string`, `system_error`, and `verbose_abort` against the
-  pinned NDK headers with the `.bazelrc` flags, and adds `tools/no_unwind.ld`
-  to every link that uses it. Add any additional compiled standard-library
-  facilities to this overlay as apps need them.
+  `tools/libcxx.BUILD.bazel` overlay compiles `algorithm`, `chrono`, `new`,
+  `new_handler`, `new_helpers`, `string`, `system_error`, and `verbose_abort`
+  against the pinned NDK headers with the `.bazelrc` flags, and adds
+  `tools/no_unwind.ld` to every link that uses it. Add any additional compiled
+  standard-library facilities to this overlay as apps need them.
 
 Build the apps from the workspace root:
 

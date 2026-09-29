@@ -1,0 +1,68 @@
+#version 460
+// Arithmetic throughput without memory traffic: every invocation runs 16
+// independent multiply-add chains of type T over values the compiler cannot fold.
+// Explicit variables instead of arrays keep the compiler from inserting moves.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_quad : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x_id = 0) in;
+
+layout(push_constant) uniform Parameters {
+  uint iterations;
+  float seed;
+};
+
+layout(std430, binding = 0) writeonly buffer Output { uvec4 sink[]; };
+
+layout(constant_id = 1) const uint kIterations = 1024;
+#if defined(CONSTANT_ITERATIONS)
+#define ITERATIONS kIterations
+#else
+#define ITERATIONS iterations
+#endif
+
+#define CHAINS(X) \
+  X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7) X(8) X(9) X(10) X(11) X(12) X(13) X(14) X(15)
+
+#if defined(MIX)
+// Two independent instruction streams, to test whether they issue in parallel.
+#define DECLARE(i)                  \
+  T v##i = T(id * 1e-9 + i * 1e-3); \
+  U w##i = U(id + i);
+#define STEP(i)                    \
+  v##i = fma(v##i, scale, offset); \
+  w##i = MIX_STEP(w##i);
+#define SUM(i) total += v##i + MIX_VALUE(w##i);
+#elif defined(INT8)
+#define T int
+#define DECLARE(i) T v##i = int(id) + i;
+// Each accumulator is also an operand, so no product is loop-invariant; signed
+// int operands select the signed packed dot product.
+#define STEP(i) v##i = dotPacked4x8AccSatEXT(v##i, b, v##i);
+#define SUM(i) total += v##i;
+#else
+#define DECLARE(i) T v##i = T(id * 1e-9 + i * 1e-3);
+#define STEP(i) v##i = fma(v##i, scale, offset);
+#define SUM(i) total += v##i;
+#endif
+
+void main() {
+  uint id = gl_GlobalInvocationID.x;
+#if defined(INT8)
+  int b = int(seed * 1e6) | 0x01020304;
+#else
+  T scale = T(0.999 + seed), offset = T(seed);
+#endif
+  CHAINS(DECLARE)
+  for (uint n = 0; n < ITERATIONS; ++n) { CHAINS(STEP) }
+  T total = T(0);
+  CHAINS(SUM)
+#if defined(INT8)
+  sink[id] = uvec4(total);
+#else
+  sink[id] = uvec4(floatBitsToUint(float(dot(total, T(1)))));
+#endif
+}

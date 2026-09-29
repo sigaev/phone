@@ -1,0 +1,180 @@
+#version 460
+// C = A B^T on the fp32 matrix multiplier: 4x4x4 cooperative matrices with one
+// element per lane, fed by vector loads, for fp32 or fp16 inputs (converted to
+// fp32) and fp32 or fp16 outputs.
+//
+// The driver's layout (verified by `gemm layouts` and every result check): in
+// each 4x4 matrix lane l holds element (l/4, l%4), so an A lane holds row l/4
+// at k = l%4 and a B lane (K x N) holds k = l/4 at column l%4. K is summed over,
+// so it is permuted consistently for A and B: each lane loads STEPS consecutive
+// K values of its row with one VECTOR-byte load, one per matrix step. A comes
+// through the load/store unit, except its first A_TEXTURE row tiles, and B
+// through the texture unit, as a linear RG32UI or RGBA32UI image over its own
+// buffer with 2^kFoldShift rows of B per image row. Steps are the outer loop, so
+// consecutive multiplies go to WM x WN independent accumulators; the driver does
+// not reorder dependent matrix multiplies. K must be a multiple of 4 * STEPS,
+// and with K split, each slice.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_GOOGLE_include_directive : require
+
+// Each load is VECTOR bytes: 8 (uvec2, RG32UI texels) or 16 (uvec4, RGBA32UI).
+#if !defined(VECTOR)
+#define VECTOR 8
+#endif
+#if VECTOR == 16
+#define VEC uvec4
+#define TEXEL(v) (v)
+#else
+#define VEC uvec2
+#define TEXEL(v) (v).xy
+#endif
+#if defined(FP16)
+#define STEPS (VECTOR / 2)
+#define OUT float16_t
+#else
+#define STEPS (VECTOR / 4)
+#define OUT float
+#endif
+
+const uint kBlockM = SG_M * WM * 4, kBlockN = SG_N * WN * 4;
+
+layout(local_size_x = SG_M * SG_N * 16) in;
+// The shape is specialized into each pipeline, so address arithmetic uses shifts
+// and adds instead of multiplies by runtime values, and loops have constant trip
+// counts. Rows of B per image row are 2^kFoldShift: 0 for nearly every shape.
+layout(constant_id = 0) const uint kFoldShift = 0;
+layout(constant_id = 1) const uint kM = 1;
+layout(constant_id = 2) const uint kN = 1;
+layout(constant_id = 3) const uint kK = 32;
+// With K split into kSplit slices, each workgroup sums one slice into fp32
+// partial sums, one C per slice, which reduce.comp adds.
+layout(constant_id = 4) const uint kSplit = 1;
+
+layout(std430, binding = 0) readonly buffer A { VEC a[]; };
+
+layout(binding = 1) uniform usampler2D b;
+#if !defined(A_TEXTURE)
+#define A_TEXTURE 0
+#endif
+#if A_TEXTURE > 0
+// The first A_TEXTURE row tiles of A come through the texture unit too; see
+// gemm_int8.comp.
+layout(binding = 3) uniform usampler2D a_image;
+#endif
+
+layout(std430, binding = 2) writeonly buffer C { OUT c[]; };
+
+layout(std430, binding = 2) writeonly buffer Partial { float partial[]; };
+
+// ABLATE removes work to show what it costs: bit 0 replaces A's loads with
+// values computed from the loop index, bit 1 B's, bit 2 the multiplies with a
+// checksum of the loaded values, and bit 3 rereads the same 256 bytes of every
+// row, so loads hit the L1 cache. Ablated kernels compute wrong results, so the
+// benchmark times them without verifying them.
+#if !defined(ABLATE)
+#define ABLATE 0
+#endif
+
+#define AMatrix coopmat<float, gl_ScopeSubgroup, 4, 4, gl_MatrixUseA>
+#define BMatrix coopmat<float, gl_ScopeSubgroup, 4, 4, gl_MatrixUseB>
+#define CMatrix coopmat<float, gl_ScopeSubgroup, 4, 4, gl_MatrixUseAccumulator>
+
+float element(VEC v, uint step) {
+#if defined(FP16)
+  return float(unpackFloat2x16(v[step / 2])[step % 2]);
+#else
+  return uintBitsToFloat(v[step]);
+#endif
+}
+
+#include "raster.glsl"
+
+void main() {
+  uint subgroup = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+  uvec3 block = raster_block((kM + kBlockM - 1) / kBlockM, (kN + kBlockN - 1) / kBlockN);
+  uint slice = kSplit > 1 ? block.z : 0;
+  uint row0 = block.y * kBlockM + (subgroup / SG_N) * WM * 4;
+  uint col0 = block.x * kBlockN + (subgroup % SG_N) * WN * 4;
+  uint item = gl_WorkGroupID.z;
+  // Rows in vector units; each block covers 4 * STEPS values of K.
+  uint row_vectors = kK / STEPS, slice_vectors = row_vectors / kSplit;
+  uint first = slice * slice_vectors;
+  uint a_image_row = item * kM + row0 + lane / 4;
+  uint a_row = a_image_row * row_vectors + lane % 4 + first;
+  uint fold_mask = (1u << kFoldShift) - 1;
+  uint b_row = item * kN + col0 + lane % 4;
+
+  CMatrix acc[WM][WN];
+  [[unroll]] for (uint i = 0; i < WM; ++i) [[unroll]]
+    for (uint j = 0; j < WN; ++j) acc[i][j] = CMatrix(0);
+#if (ABLATE & 4) != 0
+  VEC checksum = VEC(0);
+#endif
+  for (uint step_block = 0; step_block < slice_vectors; step_block += 4) {
+#if (ABLATE & 8) != 0
+    uint block = step_block & 15;
+#else
+    uint block = step_block;
+#endif
+    VEC av[WM], bv[WN];
+    [[unroll]] for (uint j = 0; j < WN; ++j) {
+#if (ABLATE & 2) != 0
+      bv[j] = VEC(block + j);
+#else
+      uint row = b_row + 4 * j;
+      ivec2 at =
+          ivec2((row & fold_mask) * row_vectors + lane / 4 + first + block, row >> kFoldShift);
+      bv[j] = TEXEL(texelFetch(b, at, 0));
+#endif
+    }
+    [[unroll]] for (uint i = 0; i < WM; ++i) {
+#if (ABLATE & 1) != 0
+      av[i] = VEC(block + 16 * i);
+      continue;
+#endif
+#if A_TEXTURE > 0
+      if (i < A_TEXTURE) {
+        av[i] = TEXEL(texelFetch(a_image, ivec2(lane % 4 + first + block, a_image_row + 4 * i), 0));
+        continue;
+      }
+#endif
+      av[i] = a[a_row + 4 * i * row_vectors + block];
+    }
+#if (ABLATE & 4) != 0
+    [[unroll]] for (uint i = 0; i < WM; ++i)
+      checksum ^= av[i];
+    [[unroll]] for (uint j = 0; j < WN; ++j)
+      checksum ^= bv[j];
+    continue;
+#endif
+    [[unroll]] for (uint t = 0; t < STEPS; ++t) {
+      BMatrix bm[WN];
+      [[unroll]] for (uint j = 0; j < WN; ++j)
+        bm[j][0] = element(bv[j], t);
+      [[unroll]] for (uint i = 0; i < WM; ++i) {
+        AMatrix am;
+        am[0] = element(av[i], t);
+        [[unroll]] for (uint j = 0; j < WN; ++j)
+          acc[i][j] = coopMatMulAdd(am, bm[j], acc[i][j]);
+      }
+    }
+  }
+
+#if (ABLATE & 4) != 0
+  acc[0][0] = CMatrix(uintBitsToFloat(checksum.x ^ checksum.y));
+#endif
+  [[unroll]] for (uint i = 0; i < WM; ++i) {
+    uint row = row0 + 4 * i + lane / 4;
+    if (row >= kM) continue;
+    [[unroll]] for (uint j = 0; j < WN; ++j) {
+      uint col = col0 + 4 * j + lane % 4, at = (item * kM + row) * kN + col;
+      if (col >= kN) continue;
+      if (kSplit > 1) partial[slice * gl_NumWorkGroups.z * kM * kN + at] = acc[i][j][0];
+      else c[at] = OUT(acc[i][j][0]);
+    }
+  }
+}

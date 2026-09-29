@@ -1,0 +1,12 @@
+#version 460
+// A dispatch that does no work, for timing the cost of one dispatch and the
+// barrier that separates it from the next.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) writeonly buffer Sink { uint sink[]; };
+
+layout(push_constant) uniform Parameters { uint marker; };
+
+void main() {
+  if (marker == 0xffffffffu) sink[gl_GlobalInvocationID.x] = marker;
+}

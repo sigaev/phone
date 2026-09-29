@@ -1,0 +1,150 @@
+#version 460
+// fp16 C = A B^T on the matrix multiplier's native fp16 shape: 4x8x8
+// cooperative matrices with fp32 accumulation and fp16 outputs.
+//
+// The driver's layout (verified by `gemm layouts` and every result check): in
+// an A matrix (4 x 8) lane l holds row l/4 at k = 2(l%4) and 2(l%4) + 1; in a B
+// matrix (8 x 8, K x N) lane l holds columns 2(l%4) and 2(l%4) + 1 at k = l/4
+// and l/4 + 4; in an accumulator (4 x 8) lane l holds row l/4 at columns l%4 and
+// l%4 + 4.
+//
+// K is summed over, so it is permuted consistently for A and B. Each iteration
+// covers 32 halves of K, four matrix steps: half 8c + 2s + e of the block is k
+// slot 2c + e of step s. An A lane with c = l%4 then loads halves 8c..8c+7 of
+// each row with one 16-byte load, and word s is its pair for step s. A B lane
+// with p = l/4 needs slots p and p + 4: half p%2 of word s in 16-byte chunks p/2
+// and 2 + p/2 of its two columns' rows, fetched through the texture unit from a
+// linear RGBA32UI image over B's buffer with 2^kFoldShift rows of B per image row.
+// The driver does not reorder dependent matrix multiplies, so the steps are the
+// outer loop and consecutive multiplies go to WM x WN independent accumulators.
+// K must be a multiple of 32, and with K split, each slice.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_GOOGLE_include_directive : require
+
+const uint kBlockM = SG_M * WM * 4, kBlockN = SG_N * WN * 8;
+
+layout(local_size_x = SG_M * SG_N * 16) in;
+// The shape is specialized into each pipeline; see gemm_int8.comp.
+layout(constant_id = 0) const uint kFoldShift = 0;
+layout(constant_id = 1) const uint kM = 1;
+layout(constant_id = 2) const uint kN = 1;
+layout(constant_id = 3) const uint kK = 32;
+// Split K; see gemm_mma4.comp.
+layout(constant_id = 4) const uint kSplit = 1;
+
+layout(std430, binding = 0) readonly buffer A { uvec4 a[]; };
+
+layout(binding = 1) uniform usampler2D b;
+
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+
+layout(std430, binding = 2) writeonly buffer Partial { float partial[]; };
+
+// ABLATE removes work to show what it costs; see gemm_mma4.comp.
+#if !defined(ABLATE)
+#define ABLATE 0
+#endif
+
+#define AMatrix coopmat<float16_t, gl_ScopeSubgroup, 4, 8, gl_MatrixUseA>
+#define BMatrix coopmat<float16_t, gl_ScopeSubgroup, 8, 8, gl_MatrixUseB>
+#define CMatrix coopmat<float, gl_ScopeSubgroup, 4, 8, gl_MatrixUseAccumulator>
+
+// Components through functions, so arrays of vectors stay in registers.
+f16vec2 pair(uvec4 v, uint step) { return unpackFloat2x16(v[step]); }
+
+float16_t half_of(uvec4 v, uint step, uint shift) { return unpackFloat2x16(v[step] >> shift).x; }
+
+#include "raster.glsl"
+
+void main() {
+  uint subgroup = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+  uvec3 block = raster_block((kM + kBlockM - 1) / kBlockM, (kN + kBlockN - 1) / kBlockN);
+  uint slice = kSplit > 1 ? block.z : 0;
+  uint row0 = block.y * kBlockM + (subgroup / SG_N) * WM * 4;
+  uint col0 = block.x * kBlockN + (subgroup % SG_N) * WN * 8;
+  uint item = gl_WorkGroupID.z;
+  // Rows of A and B in 16-byte vectors; each block is four of them.
+  uint row_vectors = kK / 8, slice_vectors = row_vectors / kSplit;
+  uint first = slice * slice_vectors;
+  uint a_row = (item * kM + row0 + lane / 4) * row_vectors + lane % 4 + first;
+  uint fold_mask = (1u << kFoldShift) - 1;
+  uint b_row = item * kN + col0 + 2 * (lane % 4);
+  uint p = lane / 4, chunk = p / 2, shift = 16 * (p % 2);
+
+  CMatrix acc[WM][WN];
+  [[unroll]] for (uint i = 0; i < WM; ++i) [[unroll]]
+    for (uint j = 0; j < WN; ++j) acc[i][j] = CMatrix(0);
+#if (ABLATE & 4) != 0
+  uvec4 checksum = uvec4(0);
+#endif
+  for (uint k_block = 0; k_block < slice_vectors; k_block += 4) {
+#if (ABLATE & 8) != 0
+    uint block = k_block & 15;
+#else
+    uint block = k_block;
+#endif
+    // bv[j][n][h]: column 2(l%4) + n of tile j, chunk p/2 + 2h.
+    uvec4 av[WM], bv[WN][2][2];
+    [[unroll]] for (uint j = 0; j < WN; ++j) [[unroll]]
+      for (uint n = 0; n < 2; ++n) [[unroll]]
+        for (uint h = 0; h < 2; ++h) {
+          uint row = b_row + 8 * j + n;
+#if (ABLATE & 2) != 0
+          bv[j][n][h] = uvec4(block + row + h);
+#else
+          ivec2 at = ivec2((row & fold_mask) * row_vectors + first + block + chunk + 2 * h,
+                           row >> kFoldShift);
+          bv[j][n][h] = texelFetch(b, at, 0);
+#endif
+        }
+    [[unroll]] for (uint i = 0; i < WM; ++i)
+#if (ABLATE & 1) != 0
+      av[i] = uvec4(block + 16 * i);
+#else
+      av[i] = a[a_row + 4 * i * row_vectors + block];
+#endif
+#if (ABLATE & 4) != 0
+    [[unroll]] for (uint i = 0; i < WM; ++i)
+      checksum ^= av[i];
+    [[unroll]] for (uint j = 0; j < WN; ++j)
+      checksum ^= bv[j][0][0] ^ bv[j][0][1] ^ bv[j][1][0] ^ bv[j][1][1];
+    continue;
+#endif
+    [[unroll]] for (uint s = 0; s < 4; ++s) {
+      BMatrix bm[WN];
+      [[unroll]] for (uint j = 0; j < WN; ++j) {
+        bm[j][0] = half_of(bv[j][0][0], s, shift);
+        bm[j][1] = half_of(bv[j][1][0], s, shift);
+        bm[j][2] = half_of(bv[j][0][1], s, shift);
+        bm[j][3] = half_of(bv[j][1][1], s, shift);
+      }
+      [[unroll]] for (uint i = 0; i < WM; ++i) {
+        AMatrix am;
+        f16vec2 x = pair(av[i], s);
+        am[0] = x.x;
+        am[1] = x.y;
+        [[unroll]] for (uint j = 0; j < WN; ++j)
+          acc[i][j] = coopMatMulAdd(am, bm[j], acc[i][j]);
+      }
+    }
+  }
+
+#if (ABLATE & 4) != 0
+  acc[0][0] = CMatrix(uintBitsToFloat(checksum.x ^ checksum.y));
+#endif
+  [[unroll]] for (uint i = 0; i < WM; ++i) {
+    uint row = row0 + 4 * i + lane / 4;
+    if (row >= kM) continue;
+    [[unroll]] for (uint j = 0; j < WN; ++j) [[unroll]]
+      for (uint e = 0; e < 2; ++e) {
+        uint col = col0 + 8 * j + lane % 4 + 4 * e, at = (item * kM + row) * kN + col;
+        if (col >= kN) continue;
+        if (kSplit > 1) partial[slice * gl_NumWorkGroups.z * kM * kN + at] = acc[i][j][e];
+        else c[at] = float16_t(acc[i][j][e]);
+      }
+  }
+}

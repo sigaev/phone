@@ -1,0 +1,102 @@
+#version 460
+// fp16 C = A B^T with packed fp16 FMAs and fp16 accumulation.
+//
+// Each lane computes TM x TN elements of C: lanes form a 4 x 4 grid over a
+// subgroup's 4 TM x 4 TN tile, so lane (r, c) owns rows 4i + r and columns
+// 4j + c. Accumulators are f16vec2 partial sums of even and odd K, added at the
+// end. Each step reads 8 halves of K: A rows through the load/store unit and B
+// rows through the texture unit, as a linear RGBA32UI image over B's buffer with
+// 2^kFoldShift rows of B per image row. K must be a multiple of 8.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_GOOGLE_include_directive : require
+
+const uint kBlockM = SG_M * TM * 4, kBlockN = SG_N * TN * 4;
+
+layout(local_size_x = SG_M * SG_N * 16) in;
+// The shape is specialized into each pipeline; see gemm_int8.comp.
+layout(constant_id = 0) const uint kFoldShift = 0;
+layout(constant_id = 1) const uint kM = 1;
+layout(constant_id = 2) const uint kN = 1;
+layout(constant_id = 3) const uint kK = 8;
+
+layout(std430, binding = 0) readonly buffer A { uvec4 a[]; };
+
+layout(binding = 1) uniform usampler2D b;
+
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+
+// ABLATE removes work to show what it costs; see gemm_mma4.comp.
+#if !defined(ABLATE)
+#define ABLATE 0
+#endif
+
+f16vec2 half2(uint word) { return unpackFloat2x16(word); }
+
+#include "raster.glsl"
+
+void main() {
+  uint subgroup = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+  uint r = lane / 4, q = lane % 4;
+  uvec2 block = raster_block((kM + kBlockM - 1) / kBlockM, (kN + kBlockN - 1) / kBlockN).xy;
+  uint row0 = block.y * kBlockM + (subgroup / SG_N) * TM * 4 + r;
+  uint col0 = block.x * kBlockN + (subgroup % SG_N) * TN * 4 + q;
+  uint item = gl_WorkGroupID.z;
+  uint row_vectors = kK / 8;
+  uint a_row = (item * kM + row0) * row_vectors;
+  uint fold_mask = (1u << kFoldShift) - 1;
+  uint b_row = item * kN + col0;
+
+  f16vec2 acc[TM][TN];
+  [[unroll]] for (uint i = 0; i < TM; ++i) [[unroll]]
+    for (uint j = 0; j < TN; ++j) acc[i][j] = f16vec2(0);
+#if (ABLATE & 4) != 0
+  uvec4 checksum = uvec4(0);
+#endif
+  for (uint k_step = 0; k_step < row_vectors; ++k_step) {
+#if (ABLATE & 8) != 0
+    uint step = k_step & 15;
+#else
+    uint step = k_step;
+#endif
+    uvec4 bv[TN];
+    [[unroll]] for (uint j = 0; j < TN; ++j) {
+      uint row = b_row + 4 * j;
+#if (ABLATE & 2) != 0
+      bv[j] = uvec4(step + j);
+#else
+      bv[j] = texelFetch(b, ivec2((row & fold_mask) * row_vectors + step, row >> kFoldShift), 0);
+#endif
+#if (ABLATE & 4) != 0
+      checksum ^= bv[j];
+#endif
+    }
+    [[unroll]] for (uint i = 0; i < TM; ++i) {
+#if (ABLATE & 1) != 0
+      uvec4 av = uvec4(step + 16 * i);
+#else
+      uvec4 av = a[a_row + 4 * i * row_vectors + step];
+#endif
+#if (ABLATE & 4) != 0
+      checksum ^= av;
+      continue;
+#endif
+      f16vec2 pairs[4] = {half2(av.x), half2(av.y), half2(av.z), half2(av.w)};
+      [[unroll]] for (uint pair = 0; pair < 4; ++pair) [[unroll]]
+        for (uint j = 0; j < TN; ++j) acc[i][j] = fma(pairs[pair], half2(bv[j][pair]), acc[i][j]);
+    }
+  }
+
+#if (ABLATE & 4) != 0
+  acc[0][0] = half2(checksum.x ^ checksum.y);
+#endif
+  [[unroll]] for (uint i = 0; i < TM; ++i) {
+    uint row = row0 + 4 * i;
+    if (row >= kM) continue;
+    [[unroll]] for (uint j = 0; j < TN; ++j) {
+      uint col = col0 + 4 * j;
+      if (col < kN) c[(item * kM + row) * kN + col] = acc[i][j].x + acc[i][j].y;
+    }
+  }
+}

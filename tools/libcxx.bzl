@@ -4,6 +4,7 @@
 _LLVM_REVISION = "386af4a5c64ab75eaee2448dc38f2e34a40bfed0"
 _SOURCES = {
     "LICENSE.TXT": "539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b",
+    "src/algorithm.cpp": "25f1a668e2dd910b546b868988f92b272fa41ab30fb884ab07b445a76dcefa20",
     "src/chrono.cpp": "9f5acabff11905fd20100c6fb7afa3450b1e9dc5b2279302a5a544e55defe361",
     "src/new.cpp": "6c32fe75863232c72b69de45bf397a9af2a7b624812e060e7036270421fff881",
     "src/new_handler.cpp": "0b17697b569d4a4cc9b3c2f97ef69fdf8d6cac72de9871489456c5d9235b1bbf",

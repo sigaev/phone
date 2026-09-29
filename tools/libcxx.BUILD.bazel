@@ -6,6 +6,7 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 cc_library(
     name = "runtime",
     srcs = [
+        "src/algorithm.cpp",
         "src/chrono.cpp",
         "src/new.cpp",
         "src/new_handler.cpp",

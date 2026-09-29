@@ -1,0 +1,66 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Upstream generates these headers with Python scripts; the release version is fixed here.
+genrule(
+    name = "build_info",
+    srcs = ["build_info.h.tmpl"],
+    outs = ["glslang/build_info.h"],
+    cmd = "sed -e 's/@major@/16/' -e 's/@minor@/6/' -e 's/@patch@/0/' -e 's/@flavor@//' $< > $@",
+)
+
+genrule(
+    name = "intrinsic_header",
+    srcs = ["glslang/ExtensionHeaders/GL_EXT_shader_realtime_clock.glsl"],
+    outs = ["glslang/glsl_intrinsic_header.h"],
+    cmd = """{
+  printf '#pragma once\\n#include <cstring>\\n#include <string>\\n'
+  printf 'std::string GL_EXT_shader_realtime_clock_GLSL = R"(\\n'
+  cat $<
+  printf '\\n)";\\nstd::string getIntrinsic(const char* const* shaders, int n) {\\n'
+  printf '  std::string result;\\n  for (int i = 0; i < n; i++)\\n'
+  printf '    if (strstr(shaders[i], "GL_EXT_shader_realtime_clock") != nullptr)\\n'
+  printf '      result.append(GL_EXT_shader_realtime_clock_GLSL);\\n  return result;\\n}\\n'
+} > $@""",
+)
+
+# The GLSL front end and SPIR-V back end, without HLSL, the C interface, or the
+# SPIR-V optimizer.
+cc_library(
+    name = "glslang",
+    srcs = glob([
+        "glslang/GenericCodeGen/*.cpp",
+        "glslang/Include/*.h",
+        "glslang/MachineIndependent/*.cpp",
+        "glslang/MachineIndependent/*.h",
+        "glslang/MachineIndependent/preprocessor/*.cpp",
+        "glslang/MachineIndependent/preprocessor/*.h",
+        "glslang/OSDependent/*.h",
+        "glslang/Public/*.h",
+        "glslang/ResourceLimits/*.cpp",
+        "SPIRV/*.cpp",
+        "SPIRV/*.h",
+    ]) + [
+        "glslang/OSDependent/Unix/ossource.cpp",
+        ":build_info",
+    ],
+    hdrs = glob(["glslang/Public/*.h"]),
+    defines = [
+        "ENABLE_OPT=0",
+        "ENABLE_SPIRV",
+        "GLSLANG_OSINCLUDE_UNIX",
+    ],
+    includes = ["."],
+    linkopts = ["-lpthread"],
+    textual_hdrs = glob(["SPIRV/*.hpp11"]),
+)
+
+cc_binary(
+    name = "glslang_validator",
+    srcs = glob(["StandAlone/*.h"]) + [
+        "StandAlone/StandAlone.cpp",
+        ":intrinsic_header",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [":glslang"],
+)

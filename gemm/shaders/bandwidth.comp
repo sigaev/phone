@@ -1,0 +1,50 @@
+#version 460
+// Streams a buffer through the GPU: READ sums it, COPY copies it, WRITE fills it.
+// Each invocation handles UNROLL consecutive vec4 elements per step, so a
+// subgroup covers 16 * 16 * UNROLL contiguous bytes; steps stride over the grid.
+layout(local_size_x_id = 0) in;
+
+// Specialized so every loop has a constant trip count: kCount vec4 elements, a
+// multiple of the grid's step, read kPasses times by kSubgroups subgroups.
+layout(constant_id = 1) const uint kCount = 1;
+layout(constant_id = 2) const uint kPasses = 1;
+layout(constant_id = 3) const uint kSubgroups = 1;
+
+layout(std430, binding = 0) readonly buffer Source { vec4 source[]; };
+
+layout(std430, binding = 1) writeonly buffer Destination { vec4 destination[]; };
+
+#if !defined(UNROLL)
+#define UNROLL 4
+#endif
+
+void main() {
+  uint subgroup = gl_WorkGroupID.x * (gl_WorkGroupSize.x / 16) + gl_LocalInvocationID.x / 16;
+  uint lane = gl_LocalInvocationID.x % 16;
+  const uint kStep = kSubgroups * 16 * UNROLL, kSteps = kCount / kStep;
+#if defined(READ)
+  vec4 total = vec4(0);
+#endif
+  for (uint pass = 0; pass < kPasses; ++pass)
+    for (uint i = 0; i < kSteps; ++i) {
+      // Each pass rotates the buffer by a different multiple of 17 subgroup spans
+      // (wrapping, as kCount is a power of two), so no two passes give an
+      // invocation the same addresses for the compiler to hoist or merge.
+      uint base = (i * kStep + subgroup * 16 * UNROLL + pass * 17 * 16 * UNROLL) & (kCount - 1);
+#if defined(WRITE)
+      for (uint j = 0; j < UNROLL; ++j) destination[base + j * 16 + lane] = vec4(base + j);
+#else
+      vec4 values[UNROLL];
+      for (uint j = 0; j < UNROLL; ++j) values[j] = source[base + j * 16 + lane];
+#if defined(READ)
+      for (uint j = 0; j < UNROLL; ++j) total += values[j];
+#else
+      for (uint j = 0; j < UNROLL; ++j) destination[base + j * 16 + lane] = values[j];
+#endif
+#endif
+    }
+#if defined(READ)
+  // Never true for the benchmark's data, but unknown to the compiler.
+  if (total.x == -1.25e-30) destination[gl_GlobalInvocationID.x] = total;
+#endif
+}

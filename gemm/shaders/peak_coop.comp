@@ -1,0 +1,96 @@
+#version 460
+// Cooperative-matrix throughput without memory traffic in the loop: each
+// subgroup multiplies register-resident tiles into CHAINS accumulators, for a
+// specialized trip count, as the GEMM kernels have.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x_id = 0) in;
+
+layout(push_constant) uniform Parameters {
+  uint iterations;
+  float seed;
+};
+#if defined(FP16_SMALL)
+#define INPUT float16_t
+#define OUTPUT float
+const uint kM = 4, kN = 8, kK = 8;
+#elif defined(FP32_SMALL)
+#define INPUT float
+#define OUTPUT float
+const uint kM = 4, kN = 4, kK = 4;
+#elif defined(INT8)
+#define INPUT int8_t
+#define OUTPUT int32_t
+const uint kM = 4, kN = 16, kK = 16;
+#endif
+
+#if !defined(CHAINS)
+#define CHAINS 4
+#endif
+layout(constant_id = 1) const uint kIterations = 256;
+const int kChains = CHAINS;
+#if defined(INT8)
+#define BMatrix coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>
+#endif
+layout(std430, binding = 0) buffer Inputs { INPUT inputs[]; };
+
+layout(std430, binding = 0) buffer Outputs { OUTPUT outputs[]; };
+
+void main() {
+  coopmat<INPUT, gl_ScopeSubgroup, kM, kK, gl_MatrixUseA> a;
+  coopmat<INPUT, gl_ScopeSubgroup, kK, kN, gl_MatrixUseB> b;
+  // Operands come from memory, so the products cannot be folded at compile time.
+  coopMatLoad(a, inputs, 0, kK, gl_CooperativeMatrixLayoutRowMajor);
+  coopMatLoad(b, inputs, kM * kK, kN, gl_CooperativeMatrixLayoutRowMajor);
+  coopmat<OUTPUT, gl_ScopeSubgroup, kM, kN, gl_MatrixUseAccumulator> c[kChains];
+  for (int i = 0; i < kChains; ++i)
+    c[i] = coopmat<OUTPUT, gl_ScopeSubgroup, kM, kN, gl_MatrixUseAccumulator>(OUTPUT(i));
+#if defined(BUILD_CHAINED) && defined(INT8)
+  // Four B operands per block, and each A row tile runs its four steps back to
+  // back on its own accumulator: dependent multiplies in sequence.
+  uint word = floatBitsToUint(seed);
+  for (uint n = 0; n < kIterations; n += 4) {
+    word = word * 1664525u + 1013904223u;
+    BMatrix bs[4];
+    for (uint t = 0; t < 4; ++t)
+      for (uint g = 0; g < 4; ++g) {
+        i8vec4 column = unpack8(int(word ^ ((4 * t + g) * 0x01010101u)));
+        for (uint e = 0; e < 4; ++e) bs[t][4 * g + e] = column[e];
+      }
+    for (int i = 0; i < kChains; ++i)
+      for (uint t = 0; t < 4; ++t) {
+        i8vec4 bytes = unpack8(int(word + uint(4 * i + t) * 0x9e3779b9u));
+        for (uint e = 0; e < 4; ++e) a[e] = bytes[e];
+        c[i] = coopMatMulAdd(a, bs[t], c[i]);
+      }
+  }
+#elif defined(BUILD_INTERLEAVED) && defined(INT8)
+  // The same work with the chains interleaved: steps outer, row tiles inner.
+  uint word = floatBitsToUint(seed);
+  for (uint n = 0; n < kIterations; n += 4) {
+    word = word * 1664525u + 1013904223u;
+    for (uint t = 0; t < 4; ++t) {
+      for (uint g = 0; g < 4; ++g) {
+        i8vec4 column = unpack8(int(word ^ ((4 * t + g) * 0x01010101u)));
+        for (uint e = 0; e < 4; ++e) b[4 * g + e] = column[e];
+      }
+      for (int i = 0; i < kChains; ++i) {
+        i8vec4 bytes = unpack8(int(word + uint(4 * i + t) * 0x9e3779b9u));
+        for (uint e = 0; e < 4; ++e) a[e] = bytes[e];
+        c[i] = coopMatMulAdd(a, b, c[i]);
+      }
+    }
+  }
+#else
+  for (uint n = 0; n < kIterations; ++n)
+    for (int i = 0; i < kChains; ++i) c[i] = coopMatMulAdd(a, b, c[i]);
+#endif
+  for (int i = 1; i < kChains; ++i) c[0] = c[0] + c[i];
+  uint subgroup = gl_GlobalInvocationID.x / gl_SubgroupSize;
+  // Every subgroup stores to the same place; only the work matters.
+  if (seed < 0)
+    coopMatStore(c[0], outputs, subgroup * kM * kN, kN, gl_CooperativeMatrixLayoutRowMajor);
+}

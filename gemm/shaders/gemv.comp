@@ -1,0 +1,80 @@
+#version 460
+// C = A B^T for small M (up to MAX_M rows), bound by streaming B from memory.
+// Each subgroup computes ROWS consecutive columns of C for every row of A: its
+// lanes read 16-byte chunks of those B rows, multiply them by the matching
+// chunks of A, and a subgroup sum finishes each dot product. K must be a
+// multiple of 16 bytes' worth of elements.
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+#if defined(FP32)
+#define OUT float
+#define ACC float
+#elif defined(FP16)
+#define OUT float16_t
+#define ACC float
+#elif defined(INT8)
+#define OUT int
+#define ACC int
+#endif
+
+layout(local_size_x = 64) in;
+// The shape is specialized into each pipeline (constant 0 is unused here).
+layout(constant_id = 1) const uint kM = 1;
+layout(constant_id = 2) const uint kN = 1;
+layout(constant_id = 3) const uint kK = 16;
+
+layout(std430, binding = 0) readonly buffer A { uvec4 a[]; };
+
+layout(std430, binding = 1) readonly buffer B { uvec4 b[]; };
+
+layout(std430, binding = 2) writeonly buffer C { OUT c[]; };
+
+ACC dot16(uvec4 x, uvec4 y) {
+#if defined(FP32)
+  return dot(uintBitsToFloat(x), uintBitsToFloat(y));
+#elif defined(FP16)
+  float total = 0;
+  [[unroll]] for (uint i = 0; i < 4; ++i)
+    total += dot(vec2(unpackFloat2x16(x[i])), vec2(unpackFloat2x16(y[i])));
+  return total;
+#else
+  int total = 0;
+  [[unroll]] for (uint i = 0; i < 4; ++i)
+    total = dotPacked4x8AccSatEXT(int(x[i]), int(y[i]), total);
+  return total;
+#endif
+}
+
+void main() {
+  uint lane = gl_SubgroupInvocationID;
+  uint col0 = (gl_WorkGroupID.x * (gl_WorkGroupSize.x / 16) + gl_SubgroupID) * ROWS;
+  uint item = gl_WorkGroupID.z;
+  uint chunks = kK * ELEMENT_BYTES / 16;
+  ACC partial[MAX_M][ROWS];
+  [[unroll]] for (uint m = 0; m < MAX_M; ++m) [[unroll]]
+    for (uint r = 0; r < ROWS; ++r) partial[m][r] = ACC(0);
+  // Rows past N read B's padding and are not stored.
+  uint b_base = (item * kN + col0) * chunks;
+  uint a_base = item * kM * chunks;
+  for (uint chunk = lane; chunk < chunks; chunk += 16) {
+    uvec4 bv[ROWS];
+    [[unroll]] for (uint r = 0; r < ROWS; ++r)
+      bv[r] = b[b_base + r * chunks + chunk];
+    [[unroll]] for (uint m = 0; m < MAX_M; ++m) {
+      if (m < kM) {
+        uvec4 av = a[a_base + m * chunks + chunk];
+        [[unroll]] for (uint r = 0; r < ROWS; ++r)
+          partial[m][r] += dot16(av, bv[r]);
+      }
+    }
+  }
+  [[unroll]] for (uint m = 0; m < MAX_M; ++m) [[unroll]]
+    for (uint r = 0; r < ROWS; ++r) {
+      ACC total = subgroupAdd(partial[m][r]);
+      if (lane == 0 && m < kM && col0 + r < kN) c[(item * kM + m) * kN + col0 + r] = OUT(total);
+    }
+}

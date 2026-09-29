@@ -28,6 +28,18 @@ http_archive(
     urls = ["https://codeload.github.com/nothings/stb/tar.gz/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760"],
 )
 
+# The gemm app's compute shaders use Vulkan 1.4 cooperative matrices and integer
+# dot products, which the NDK's 2022 shader compiler and validator predate.
+http_archive(
+    name = "glslang",
+    build_file = "//tools:glslang.BUILD.bazel",
+    sha256 = "9c09b901149c729df745057dafa815278aaa101b84d2b6e14f16a42de52f97f2",
+    strip_prefix = "glslang-16.6.0",
+    urls = ["https://github.com/KhronosGroup/glslang/archive/refs/tags/16.6.0.tar.gz"],
+)
+
+bazel_dep(name = "spirv_tools", version = "2026.1")
+
 bazel_dep(name = "hermetic_android_toolchains", version = "0.4.0", dev_dependency = True)
 
 bazel_dep(name = "platforms", version = "1.0.0")
