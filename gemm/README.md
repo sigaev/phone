@@ -288,3 +288,91 @@ steady-state criterion, from 688 seconds; the int8 and fp32 soaks were still
 oscillating after 15 minutes. An earlier soak of a previous int8 kernel first
 slowed at about 40 seconds, still at full clock, first lowered the clock at
 about 320 seconds, and ended at about 74% of its unthrottled rate.
+
+## CPU for contrast
+
+The same Tensor G3's CPU has four Cortex-A510 cores at up to 1.70 GHz, four
+Cortex-A715 at 2.37 GHz, and one Cortex-X3 at 2.91 GHz. All nine support SVE2,
+but with 128-bit vectors, the same width as NEON, so SVE2 and NEON instructions
+ran at the same rates, apart from the X3's throttling (below). The table shows
+instruction streams without memory traffic, like `gemm peak`: 28 independent
+accumulators per core, with the NEON forms where both exist. Rates are TFLOPS
+(TOPS for int8), and the GPU column is the matching `gemm peak` ceiling at
+890 MHz:
+
+| Instruction stream | A510 x4 | A715 x4 | X3 | All 9 cores | GPU ceiling |
+|---|---:|---:|---:|---:|---:|
+| fp64 FMA | 0.027 | 0.075 | 0.031 | 0.127 | |
+| fp32 FMA | 0.049 | 0.151 | 0.055 | 0.254 | 1.511 |
+| fp16 FMA | 0.098 | 0.301 | 0.123 | 0.479 | 3.007 |
+| bf16 `BFMMLA` (fp32 accumulation) | 0.037 | 0.603 | 0.281 | 0.839 | |
+| int8 `SDOT` (int32 accumulation) | 0.196 | 0.603 | 0.234 | 0.969 | 3.140 |
+| int8 `SMMLA` (int32 accumulation) | 0.397 | 1.204 | 0.497 | 2.082 | 5.881 |
+
+- **Per core.** Each A715 issues two 128-bit FMAs per clock, and each pair of
+  A510s shares one vector unit that does the same, so four A510s reach only
+  twice the rate of one. The X3 has four FMA pipes and reaches four per clock in
+  bursts, but it throttles its vector issue rate: in alternating windows of
+  about 10 ms it issues four or two per clock, with its clock steady at
+  2.91 GHz. Over the 1.5-second measurements that averaged 2.3 to 2.7 per
+  clock, 0.055 TFLOPS fp32 with NEON and 0.063 with SVE2, where four per clock
+  would give 0.093.
+- **Against the GPU.** The GPU's ceilings are six times the whole CPU's for
+  fp32 and fp16 FMAs, and 2.8 times its `SMMLA` rate. The GPU's best GEMMs,
+  1.04 TFLOPS fp32 and 3.31 TOPS int8, are 4.1 and 1.6 times the CPU's
+  ceilings. The GPU has no bf16. The CPU's `BFMMLA` ceiling, 0.83 TFLOPS, is
+  82% of the GPU's best fp16 GEMM with fp32 accumulation; no CPU GEMM was
+  measured.
+- **Decode.** The decode GEMVs run at 0.015 TFLOPS fp32 and 0.06 TOPS int8
+  while streaming DRAM at 28-32 GB/s, far below every CPU ceiling above, so for
+  them the comparison is memory bandwidth, not arithmetic.
+
+Read bandwidth by working-set size, in GB/s: the GPU's `read ... repeatedly`
+rows from `gemm bandwidth 0.7`, steady at 890 MHz, and the CPU reading the same
+sizes, split into equal slices, one per thread:
+
+| Working set | GPU | X3 | A715 | A510 | A715 x4 | All 9 cores |
+|---|---:|---:|---:|---:|---:|---:|
+| 256 MiB | 32.7 | 19.6 | 22.0 | 8.5 | 30.7 | 31.7 |
+| 128 MiB | 31.8 | 21.3 | 21.8 | 8.9 | 30.3 | 31.0 |
+| 64 MiB | 31.9 | 21.4 | 22.1 | 8.3 | 30.4 | 30.3 |
+| 32 MiB | 65.5 | 23.8 | 22.5 | 9.1 | 25.2 | 34.4 |
+| 16 MiB | 129.1 | 30.3 | 28.4 | 9.1 | 34.6 | 77.2 |
+| 8 MiB | 151.2 | 31.4 | 26.0 | 9.5 | 81.3 | 149.8 |
+| 4 MiB | 165.2 | 31.5 | 23.2 | 10.7 | 84.2 | 192.3 |
+| 1 MiB | 53.9 | 59.1 | 21.3 | 10.8 | 126.0 | 176.8 |
+| 256 KiB | 171.7 | 74.7 | 27.6 | 11.4 | 185.4 | 406.2 |
+| 64 KiB | 250.2 | 83.6 | 44.1 | 13.8 | 171.3 | 397.8 |
+| 16 KiB | | 109.1 | 44.3 | 41.1 | 168.9 | 350.2 |
+
+- **DRAM.** From 64 MiB up, all nine cores read 30-32 GB/s, level with the
+  GPU's 32-33. Four A715 cores already reach 30.5, while one A715 or X3 reads
+  20-22 GB/s and one A510 8.5. The memory system, not either processor, sets
+  this limit, and the two share it: in the same `gemm bandwidth` run, the GPU
+  read 19.7 GB/s while a CPU memcpy alongside it moved 15.3 GB/s, 35 GB/s
+  together.
+- **System cache.** The GPU reads 16 and 32 MiB working sets at 129 and 66 GB/s,
+  four and two times its DRAM rate; the CPU reads them at only 77 and 34 GB/s.
+  The CPU catches up at 8 MiB and passes the GPU at 4 MiB, 192 GB/s against 165.
+- **Private caches.** At 256 KiB and below, each thread's slice fits its core's
+  own caches, and all nine cores together read 350-406 GB/s, 1.6 to 2.4 times
+  the GPU at the same sizes. From L1, an X3 reads 109 GB/s (37 bytes per clock)
+  and an A715 44 GB/s (19 bytes per clock).
+- **Anomaly.** The GPU's 1 MiB result, below both of its neighbours, was steady
+  but has not been investigated.
+
+These rates come from standalone inline-assembly benchmarks, not part of this
+package, run on 2026-09-29 with nothing else running. Each arithmetic
+measurement ran for 1.5 seconds after a 0.3-second warm-up, with 3-second pauses
+between measurements but without the cooling and steady-state checks in
+Methodology. The A715 and X3 cores held their maximum clocks throughout and the
+A510s ran at 1.55-1.70 GHz, so the rates are unthrottled ceilings. Android lets
+only the foreground app run on the X3: in the background, `sched_setaffinity` to
+cpu8 fails and threads pinned there are moved off it, so the benchmarks ran with
+Termux in the foreground, and the arithmetic benchmark checks that every thread
+stayed on its core and repeats any measurement where one did not. Android denies
+`perf_event_open` to apps, so clocks were sampled from each core's
+`scaling_cur_freq`. A chain of dependent adds, one per clock, matched those
+samples on the A715 and X3 cores and came within 10% on the A510s. The read
+benchmark loads 256 bytes per loop iteration with 32-byte `ldp` pair loads, and
+each thread reads its slice for 1 second after a 0.2-second warm-up.
