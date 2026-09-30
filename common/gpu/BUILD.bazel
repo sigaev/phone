@@ -1,7 +1,7 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//tools:spirv.bzl", "spirv_shader")
+load("//tools:spirv.bzl", "glslang_shader")
 
-[spirv_shader(
+[glslang_shader(
     name = name.replace(".", "_"),
     src = "shaders/" + name,
 ) for name in [

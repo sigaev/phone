@@ -35,6 +35,13 @@
   `.clang-format`. Separate function definitions with a blank line and omit
   comments on closing namespace braces.
 
+## Shaders
+
+- Build every Vulkan shader with `glslang_shader` from `tools/spirv.bzl`, which
+  compiles GLSL with glslang, optimizes the SPIR-V with `spirv-opt -Os`, and
+  validates it with `spirv-val`. Do not add other shader compilers, skip or
+  change the optimization for individual shaders, or check in SPIR-V.
+
 ## C++ style and API design
 
 - Use `CamelCase` for classes, structs, and other type names; `snake_case` for

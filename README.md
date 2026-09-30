@@ -11,12 +11,13 @@ directories:
 - `common/gpu/` provides the shared Vulkan 1.4 renderer, mesh primitives,
   shadows, HDR, bloom, compute particles, and GPU text drawing. Its overlay
   mode draws only multisampled 2D shapes and text, for flat interfaces.
-- `tools/spirv.bzl` compiles and validates SPIR-V during the Bazel build:
-  `spirv_shader` with the pinned NDK's `glslc` and `spirv-val`, and
-  `glslang_shader`, for the GEMM benchmark's Vulkan 1.4 cooperative matrices
-  and integer dot products, with Khronos's glslang 16.6.0 (fetched with a
-  SHA-256 and built by `tools/glslang.BUILD.bazel`) and SPIRV-Tools 2026.1 from
-  the Bazel Central Registry. No shader compiler is linked into the apps.
+- `tools/spirv.bzl` compiles every shader during the Bazel build with Khronos's
+  glslang 16.6.0 (fetched with a SHA-256 and built by
+  `tools/glslang.BUILD.bazel`), then optimizes the SPIR-V with `spirv-opt -Os`
+  and validates it with `spirv-val`, both from SPIRV-Tools 2026.1 in the Bazel
+  Central Registry. Unlike the NDK's shader tools, they support the GEMM
+  benchmark's Vulkan 1.4 cooperative matrices and integer dot products. No
+  shader compiler is linked into the apps.
 - `BUILD.bazel` defines the shared `//:arm64-v8a` Android platform, which
   `.bazelrc` selects for every build.
 - `MODULE.bazel`, `.bazelrc`, and `tools/` configure the toolchains.
@@ -107,11 +108,10 @@ Registry with pinned, checksum-verified ARM64 archives:
 
 The community builds replace Google's x86-64 host binaries. The patch in
 `tools/patches/` adapts the upstream Bazel module's Linux host and Java
-toolchain constraints and NDK directory layout, and exposes the NDK's ARM64
-`glslc` and `spirv-val` to `tools/spirv.bzl`. It also adds a platform-tools
+toolchain constraints and NDK directory layout. It also adds a platform-tools
 strip prefix for the combined SDK archive, whose Build Tools have no optional
-`lib64` directory. NDK extraction keeps the shader tools and skips bundled
-Python, clangd, clang-tidy, BOLT, other unused LLVM analysis and debug-info
+`lib64` directory. NDK extraction skips the shader tools, bundled Python,
+clangd, clang-tidy, BOLT, other unused LLVM analysis and debug-info
 tools, and `lldb-server` to fit the phone's storage. Extraction requires GNU
 `tar` and `xz`; compiler tools, headers, sysroots, and runtime libraries are
 retained.

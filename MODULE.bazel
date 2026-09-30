@@ -28,8 +28,9 @@ http_archive(
     urls = ["https://codeload.github.com/nothings/stb/tar.gz/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760"],
 )
 
-# The gemm app's compute shaders use Vulkan 1.4 cooperative matrices and integer
-# dot products, which the NDK's 2022 shader compiler and validator predate.
+# All shaders compile with glslang. The gemm app's compute shaders use Vulkan 1.4
+# cooperative matrices and integer dot products, which the NDK's 2022 shader
+# compiler and validator predate.
 http_archive(
     name = "glslang",
     build_file = "//tools:glslang.BUILD.bazel",

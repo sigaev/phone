@@ -172,8 +172,8 @@ from `.bazelrc`, including C++23 for ARMv9-A, hidden symbols, link-time
 optimization across all native libraries, full symbol stripping, and 16 KiB ELF
 segment alignment; targets add only their own libraries, such as
 `-lnativewindow`, and the tests' wrapped functions. Vulkan GLSL lives
-in `shaders/` and `//common/gpu/shaders`; Bazel compiles and validates SPIR-V 1.6 with
-the pinned NDK shader tools and embeds it in the native library. NDK r29's API 35
+in `shaders/` and `//common/gpu/shaders`; Bazel compiles, optimizes, and validates SPIR-V 1.6
+with glslang and SPIRV-Tools and embeds it in the native library. NDK r29's API 35
 stub library predates Vulkan 1.4, so the renderer loads its one Vulkan 1.4
 command, `vkCmdPushDescriptorSet`, and the display-timing commands from the
 driver.
@@ -363,7 +363,7 @@ synchronous offscreen measurements, not sustained on-screen frame rates.
 Geometry and rendering workload are preserved: 747,078 triangles in High and
 869,830 in Ultra, 4x MSAA, the same shadow resolutions, six bloom passes, and
 16,384/65,536 compute particles. Ultra renders at 1404x3120. Vulkan adds explicit
-resource management and command recording; optimized SPIR-V occupies 25,068
+resource management and command recording; optimized SPIR-V occupies 27,968
 uncompressed bytes versus 8,777 bytes of previous shader source. APK growth is
 12 KiB. No validation library, shader compiler, exception runtime, unwinder,
 demangler, debug information, or static symbol table is bundled.
