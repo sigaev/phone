@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.demo.chromecast" android:versionCode="1" android:versionName="1.0">
+    <uses-sdk android:minSdkVersion="36" android:targetSdkVersion="36" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00404000" android:required="true" />
+    <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="true" />
+    <uses-feature android:name="android.hardware.wifi" android:required="true" />
+    <!-- Local connections to Chromecasts on the phone's Wi-Fi networks. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Joining a Chromecast's setup hotspot, or its new network, for this app. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <application android:label="Chromecast Wi-Fi" android:hasCode="false"
+        android:allowBackup="false" android:extractNativeLibs="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <!-- Back moves up a screen as a key event. Without Java code the app cannot
+             register a predictive-back callback, which would replace that event. -->
+        <activity android:name="android.app.NativeActivity" android:exported="true"
+            android:enableOnBackInvokedCallback="false"
+            android:screenOrientation="fullUser"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|density|uiMode">
+            <!-- android_binary links native deps as lib<target-name>.so. -->
+            <meta-data android:name="android.app.lib_name" android:value="chromecast" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

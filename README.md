@@ -1,7 +1,9 @@
 # Android Bazel workspace
 
 The [Native Buttons app](native_buttons/README.md) lives in `native_buttons/`,
-the [Sudoku app](sudoku/README.md) in `sudoku/`, and the
+the [Sudoku app](sudoku/README.md) in `sudoku/`, the
+[Chromecast Wi-Fi app](chromecast/README.md), which moves a Chromecast to
+another Wi-Fi network, in `chromecast/`, and the
 [GEMM benchmark](gemm/README.md), which measures this phone's GPU with Vulkan
 compute, in `gemm/`. Shared code and build infrastructure stay outside app
 directories:
@@ -40,7 +42,9 @@ directories:
 - The NDK's Vulkan headers predate 1.4, so Khronos's Vulkan-Headers come from
   the Bazel Central Registry's `vulkan_headers` module.
 - stb is fetched by Bazel from a pinned upstream commit, verified by SHA-256,
-  and exposed as `@stb//:stb_truetype`. No third-party sources are vendored.
+  and exposed as `@stb//:stb_truetype`. Mbed TLS, which the Chromecast app uses
+  for TLS and RSA, comes from the Bazel Central Registry. No third-party
+  sources are vendored.
 - `tools/libcxx.bzl` fetches libc++ sources from the LLVM revision recorded in
   NDK r29's `clang_source_info.md`, with a SHA-256 for every file. The
   `tools/libcxx.BUILD.bazel` overlay compiles `algorithm`, `chrono`, `new`,
@@ -52,15 +56,15 @@ directories:
 Build the apps from the workspace root:
 
 ```sh
-bazel build //native_buttons //sudoku
+bazel build //native_buttons //sudoku //chromecast
 ```
 
-The APKs are `bazel-bin/native_buttons/native_buttons.apk` and
-`bazel-bin/sudoku/sudoku.apk`. Bazel compiles, links, packages, aligns, and
-signs each APK with rules_android's debug key, including on a fresh checkout
+The APKs are `bazel-bin/native_buttons/native_buttons.apk`,
+`bazel-bin/sudoku/sudoku.apk`, and `bazel-bin/chromecast/chromecast.apk`.
+Bazel compiles, links, packages, aligns, and signs each APK with rules_android's debug key, including on a fresh checkout
 once `.bazelrc.local` holds the settings below. There are no
 build wrapper scripts, project `genrule` targets, or manually generated keys.
-Both apps require Android 16 (API 36), the ARMv9-A CPU of this phone, a Pixel 8
+All apps require Android 16 (API 36), the ARMv9-A CPU of this phone, a Pixel 8
 Pro, and its Vulkan 1.4 GPU; there are no code paths for older releases or
 hardware. API 36 verifies APK Signature Scheme v3, so `.bazelrc` omits v1 and v2
 signatures. Its `v4` signing method also writes a v4 `.idsig` beside each APK.
