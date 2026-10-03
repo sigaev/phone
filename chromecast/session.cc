@@ -427,8 +427,58 @@ void run_open(Session& s, int index) {
   open(s, d);
 }
 
-// Persist the joined network on the device and confirm it is saved.
-void finish(Session& s, Device& d, const WifiNetwork& target) {
+bool request_target(Session& s, const WifiNetwork& target, const std::string& password) {
+  if (s.target_request >= 0) return true;
+  if (s.hotspot_request >= 0) release_network(*s.platform, s.hotspot_request);
+  s.hotspot_request = -1;
+  WifiRequest r;
+  r.ssid = target.ssid;
+  r.passphrase = password;
+  r.wpa3 = target.auth == 10;
+  auto requested = request_network(*s.platform, r);
+  if (!requested) {
+    fail(s,
+         "Android could not join " + target.ssid + ": " + requested.error().message +
+             ". Connect this phone to that Wi-Fi in Settings, then search again.",
+         false);
+    return false;
+  }
+  s.target_request = *requested;
+  s.work.prompt = true;
+  publish(s);
+  return true;
+}
+
+bool find_on_lan(Session& s, Device& device) {
+  for (const PhoneNetwork& n : list_networks(*s.platform)) {
+    if (interrupted(s)) return false;
+    if (on_hotspot(s, n)) continue;
+    for (Device& found : find_devices(s, n, {parse_address(device.info.ip)})) {
+      if (!same_device(found.info, device.info)) continue;
+      device = std::move(found);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool on_target(const Device& d, const WifiNetwork& target) {
+  return d.info.ssid == target.ssid && d.info.state >= kConnected && d.info.state <= 64;
+}
+
+bool network_saved(const Device& d, const WifiNetwork& target) {
+  if (d.info.state == kSaved) return true;
+  // A previously saved SSID does not confirm this pending configuration.
+  if (d.info.state == kNotSaved) return false;
+  auto configured = request(d.endpoint, "GET", "/setup/configured_networks");
+  if (!configured || configured->status != 200) return false;
+  auto list = parse_configured(configured->body);
+  return std::find(list.begin(), list.end(), target.ssid) != list.end();
+}
+
+// Saving must be confirmed, including when save_wifi closes the setup hotspot.
+// Reaching the same device on the target LAN is also required before success.
+void finish(Session& s, Device& d, const WifiNetwork& target, const std::string& password) {
   s.work.joined = true;
   s.work.prompt = false;
   s.work.stage = Stage::kSaving;
@@ -436,32 +486,67 @@ void finish(Session& s, Device& d, const WifiNetwork& target) {
   publish(s);
   bool saved = false;
   for (int attempt = 0; attempt < 4 && !saved; ++attempt) {
-    if (attempt && !pause(s, 2)) return;
-    auto configured = request(d.endpoint, "GET", "/setup/configured_networks");
-    if (configured && configured->status == 200) {
-      auto list = parse_configured(configured->body);
-      if (std::find(list.begin(), list.end(), target.ssid) != list.end()) {
-        saved = true;
-        break;
-      }
+    if (interrupted(s) || (attempt && !pause(s, 2))) return;
+    Endpoint endpoint = d.endpoint;
+    auto info = read_info(s, endpoint, 1500);
+    if (info && same_device(*info, d.info)) {
+      d.info = *info;
+      d.endpoint = endpoint;
+    } else if (!find_on_lan(s, d)) {
+      if (!request_target(s, target, password)) return;
+      continue;
     }
+    if (!on_target(d, target)) {
+      s.work.joined = false;
+      fail(s, name_of(d) + " did not stay on " + target.ssid + ". Try connecting again.", true);
+      return;
+    }
+    saved = network_saved(d, target);
+    if (saved) break;
     auto response = post(d.endpoint, "/setup/save_wifi");
-    if (response && response->status == 200)
-      if (auto state = parse_info(response->body); state && state->state == kSaved) saved = true;
+    if (response && response->status == 200) {
+      auto state = parse_info(response->body);
+      if (state && state->state >= kConnected && state->state <= 64) d.info.state = state->state;
+      saved = network_saved(d, target);
+    }
   }
   if (interrupted(s)) return;
-  Endpoint e = d.endpoint;
-  if (auto info = read_info(s, e, 3000); info && same_device(*info, d.info)) d.info = *info;
+  remember(s, d.info);
+  save_known(s);
+  if (!saved) {
+    fail(s,
+         name_of(d) + " joined " + target.ssid +
+             " but did not confirm saving Wi-Fi. Setup is unfinished. Try again.",
+         true);
+    return;
+  }
+  // A save acknowledgement over the hotspot is not proof that the target LAN
+  // works. Keep the request until the device is found there or the deadline ends.
+  double start = monotonic();
+  while (d.hotspot && since(s, start) < 90) {
+    if (interrupted(s)) return;
+    if (find_on_lan(s, d)) break;
+    if (!request_target(s, target, password) || !pause(s, 2)) return;
+  }
+  if (interrupted(s)) return;
+  if (d.hotspot || !on_target(d, target)) {
+    fail(s,
+         "Wi-Fi was saved, but " + name_of(d) + " could not be verified on " + target.ssid +
+             ". Setup is unfinished. Check the TV, then search again.",
+         false);
+    return;
+  }
   remember(s, d.info);
   save_known(s);
   release_requests(s);
   s.work.device = d;
   s.work.stage = Stage::kDone;
-  bool home =
-      !d.info.ip.empty() && !in_subnet(parse_address(d.info.ip), s.config.hotspot_address, 24);
-  std::string where = home ? " at " + d.info.ip : "";
-  s.work.message = name_of(d) + " is on " + target.ssid + where + ".";
-  if (!saved) s.work.message += " It did not confirm saving the network.";
+  s.work.message = "Wi-Fi saved on " + target.ssid + ".";
+  if (d.info.state == kSaved)
+    s.work.message += " Chromecast still needs an update. Wait for Ready to Cast on the TV.";
+  else if (d.info.state == 63 || d.info.state == 64)
+    s.work.message += " Finish Chromecast setup in Google Home to leave the Welcome screen.";
+  else if (!d.info.ip.empty()) s.work.message += " " + name_of(d) + " is at " + d.info.ip + ".";
   publish(s);
 }
 
@@ -538,7 +623,7 @@ void run_join(Session& s, int index, std::string password) {
       return;
     }
     if (now->ssid == target.ssid && now->state >= kConnected && now->state <= 64) {
-      finish(s, d, target);
+      finish(s, d, target, password);
       return;
     }
     if (now->state >= 20 && now->state < kConnected) left = true;
@@ -567,7 +652,7 @@ void run_join(Session& s, int index, std::string password) {
         if (found.info.ssid == target.ssid && state >= kConnected && state <= 64) {
           found.info.public_key = d.info.public_key;
           d = found;
-          finish(s, d, target);
+          finish(s, d, target, password);
           return;
         }
         if (failed_state(state)) {
@@ -587,22 +672,7 @@ void run_join(Session& s, int index, std::string password) {
     }
     // The phone may not be on the new network; ask Android to join it too.
     if (s.target_request < 0 && since(s, finding) > 15) {
-      WifiRequest r;
-      r.ssid = target.ssid;
-      r.passphrase = password;
-      r.wpa3 = target.auth == 10;
-      auto requested = request_network(*s.platform, r);
-      if (!requested) {
-        fail(s,
-             "Android could not join " + target.ssid + ": " + requested.error().message +
-                 ". Connect this phone to that Wi-Fi in Settings, then search again. "
-                 "The Chromecast's connection is not confirmed.",
-             false);
-        return;
-      }
-      s.target_request = *requested;
-      s.work.prompt = true;
-      publish(s);
+      if (!request_target(s, target, password)) return;
     }
     if (!pause(s, 2)) return;
   }

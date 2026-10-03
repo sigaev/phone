@@ -158,9 +158,10 @@ std::pair<int, std::string> handle(FakeDevice& d, std::string_view method, std::
   }
   if (method == "POST" && path == "/setup/save_wifi") {
     ++d.record.saves;
-    if (d.state == 61) {
+    if (d.config.save_status != 200) return {d.config.save_status, ""};
+    if (d.state == 61 && d.record.saves >= d.config.save_after_attempts) {
       if (!has(d.record.configured, d.ssid)) d.record.configured.push_back(d.ssid);
-      d.state = 60;
+      d.state = d.config.after_save_state;
       // The hotspot closes once the network is saved.
       if (d.joined_on_hotspot) d.setup_mode = d.joined_on_hotspot = false;
     }

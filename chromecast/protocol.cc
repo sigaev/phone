@@ -88,7 +88,7 @@ const char* describe_state(int state) {
     case 61:
       return "Connected, not saved yet";
     case 62:
-      return "Connected and saved";
+      return "Wi-Fi saved, update pending";
     case 63:
     case 64:
       return "Connected, setup pending";

@@ -282,6 +282,36 @@ void test_scan_failure(const std::string& directory, FakeScanBehavior behavior) 
     check(active_requests(*w.platform) == 0, "a failed scan releases the hotspot request");
   }
 }
+
+void test_save_confirmation(const std::string& directory, int status, int attempts, int state) {
+  auto config = home_device();
+  config.save_status = status;
+  config.save_after_attempts = attempts;
+  config.after_save_state = state;
+  World w = make_world(config, {"Home", "Upstairs"}, directory);
+  if (!w.session) return;
+  Session& s = *w.session;
+  wait_for(s, search(s), Stage::kDevices);
+  auto listed = wait_for(s, open_device(s, 0), Stage::kNetworks);
+  bool saves = status == 200 && attempts <= 4;
+  auto result = wait_for(s, join(s, index_of(listed, "Upstairs"), "upstairs-pass"),
+                         saves ? Stage::kDone : Stage::kFailed);
+  if (saves) {
+    check(result.stage == Stage::kDone && get_record(*w.device).configured.size() == 2,
+          "completion requires confirmed saved Wi-Fi, including on the last attempt");
+    if (state == 62)
+      check(result.message.find("update") != std::string::npos,
+            "saved Wi-Fi with a pending update is explained");
+    if (state == 63 || state == 64)
+      check(result.message.find("Google Home") != std::string::npos,
+            "unfinished Chromecast setup is explained after saving Wi-Fi");
+  } else {
+    check(result.stage == Stage::kFailed && result.failed == Stage::kSaving && result.retry,
+          "failed or unconfirmed saving cannot produce a success screen");
+    check(result.message.find("did not confirm saving") != std::string::npos,
+          "saving failures state that setup is unfinished");
+  }
+}
 }
 
 int main() {
@@ -308,6 +338,12 @@ int main() {
   for (auto behavior : {FakeScanBehavior::kEmpty, FakeScanBehavior::kReject,
                         FakeScanBehavior::kDisconnect, FakeScanBehavior::kInvalid})
     test_scan_failure(second, behavior);
+  test_save_confirmation(second, 403, 1, 60);
+  test_save_confirmation(second, 200, 100, 60);
+  test_save_confirmation(second, 200, 4, 60);
+  test_save_confirmation(second, 200, 1, 62);
+  test_save_confirmation(second, 200, 1, 63);
+  test_save_confirmation(second, 200, 1, 64);
   std::string command = std::string("rm -rf ") + root;
   (void)!system(command.c_str());
   if (failures) return 1;

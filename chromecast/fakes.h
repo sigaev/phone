@@ -35,6 +35,7 @@ struct FakeDeviceConfig {
   // How long the device is unreachable while it switches networks.
   double switch_seconds = .3;
   FakeScanBehavior scan = FakeScanBehavior::kNormal;
+  int save_status = 200, save_after_attempts = 1, after_save_state = 60;
 };
 
 struct FakeRecord {

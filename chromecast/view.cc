@@ -284,10 +284,14 @@ void layout_progress(Builder& b, const ViewInput& in) {
       if (i == 2)
         w.detail = s.prompt ? "If Android asks, approve joining " + target
                             : "Searching this phone's Wi-Fi networks";
+      if (i == 3)
+        w.detail = s.prompt ? "If Android asks, approve joining " + target
+                            : "Confirming saved Wi-Fi and the new connection";
     }
   }
   if (s.stage == Stage::kDone) {
-    b.row(Kind::kSuccess, 344, 96, s.message);
+    bool pending = s.device.info.state >= kSaved;
+    b.row(pending ? Kind::kText : Kind::kSuccess, 344, 112, s.message);
     b.bottom(Kind::kPrimary, "Done", Target::kDone, true);
   } else if (failed) {
     b.row(Kind::kError, 344, 112, s.message);

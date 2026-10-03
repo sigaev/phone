@@ -64,7 +64,15 @@ The progress screen then shows four steps:
    the error and explains how to connect through Settings. Discovery stops after
    roughly three minutes when no device is found.
 4. **Save.** Once the Chromecast reports it is on the new network, the app
-   calls `save_wifi` until `configured_networks` lists that network.
+   calls `save_wifi` and requires confirmation from `configured_networks` or
+   setup state 62. If saving closes the setup hotspot, it rediscovers the same
+   device on the target network to finish verification. An unconfirmed save
+   reports unfinished setup, with a retry, instead of a successful connection.
+
+Saving Wi-Fi does not complete every step of a factory-reset Chromecast's
+setup. The result explains when the device reports an update pending or needs
+setup completed in Google Home. A blue Welcome screen is not reported as
+ready to cast.
 
 A failure says what went wrong and, where a different password might help,
 offers **Try again**, which rescans and keeps the typed password for
@@ -153,6 +161,8 @@ The tests cover the following:
     cancellation that releases an outstanding request without confirming a join.
   - empty scans, rejected scans, malformed results, and a hotspot connection
     lost between starting a scan and reading its results.
+  - rejected and unconfirmed saves, verification after the last save attempt,
+    and update or setup requirements after Wi-Fi is saved.
 - `app_test`: checks the layouts of every screen at five window sizes for
   overlap, safe areas, and hit targets. It then taps through the real app on the
   GPU with offscreen rendering, typing passwords with symbols on the on-screen
