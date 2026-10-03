@@ -106,6 +106,7 @@ Snapshot sample(Stage stage) {
   s.retry = true;
   s.failed = Stage::kFinding;
   s.prompt = true;
+  s.joined = stage == Stage::kSaving || stage == Stage::kDone;
   return s;
 }
 
@@ -198,6 +199,22 @@ void check_layouts() {
   Keyboard shifted{0, 1};
   check(key_char('q', shifted) == 'Q' && key_char('q', {}) == 'q' && key_char('1', shifted) == '1',
         "shift capitalizes letters");
+  for (Stage stage : {Stage::kFinding, Stage::kFailed, Stage::kSaving, Stage::kDone}) {
+    Snapshot progress = sample(stage);
+    ViewInput in;
+    in.snapshot = &progress;
+    in.screen = Screen::kProgress;
+    auto layout = layout_view(1080, 2400, {}, 3, in);
+    int step = 0;
+    for (const Widget& widget : layout.widgets) {
+      if (widget.kind != Kind::kStep || step++ != 1) continue;
+      check(progress.joined ? widget.status == 2 : widget.status == 0,
+            "Join gets a green check only after the Chromecast confirms the target network");
+      check(progress.joined || widget.detail == "Connection not yet confirmed",
+            "discovery and discovery failure keep the join explicitly unconfirmed");
+    }
+    check(step == 4, "the progress screen has four steps");
+  }
 }
 
 std::string output_directory;

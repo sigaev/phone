@@ -275,10 +275,14 @@ void layout_progress(Builder& b, const ViewInput& in) {
   for (int i = 0; i < 4; ++i) {
     Widget& w = b.row(Kind::kStep, 96 + i * 60, 52, labels[i]);
     w.status = i < current ? 2 : i > current ? 0 : failed ? 3 : 1;
+    if (i == 1 && current > 1 && !s.joined) {
+      w.status = 0;
+      w.detail = "Connection not yet confirmed";
+    }
     if (i == current && !failed) {
       if (i == 1) w.detail = "This can take up to a minute";
       if (i == 2)
-        w.detail = s.prompt ? "Approve Android's prompt to join " + target
+        w.detail = s.prompt ? "If Android asks, approve joining " + target
                             : "Searching this phone's Wi-Fi networks";
     }
   }

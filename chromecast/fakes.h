@@ -21,6 +21,8 @@ struct FakeNetwork {
   int auth = 7;
 };
 
+enum class FakeScanBehavior { kNormal, kEmpty, kReject, kDisconnect, kInvalid };
+
 struct FakeDeviceConfig {
   std::uint32_t lan = 0x7f000001, hotspot = 0x7f000101;
   std::string name = "Chromecast1234", mac = "6C:AD:F8:00:12:34",
@@ -32,6 +34,7 @@ struct FakeDeviceConfig {
   bool keeps_hotspot = false;
   // How long the device is unreachable while it switches networks.
   double switch_seconds = .3;
+  FakeScanBehavior scan = FakeScanBehavior::kNormal;
 };
 
 struct FakeRecord {
@@ -50,9 +53,12 @@ FakeRecord get_record(FakeDevice& device);
 // The SSID the device is on, empty in setup mode.
 std::string current_ssid(FakeDevice& device);
 
+enum class FakeRequestBehavior { kConnect, kWait, kError };
+
 // The phone starts on the given home networks, each a loopback /24 address.
-common::Owner<Platform> create_fake_platform(FakeDevice& device,
-                                             const std::vector<std::string>& ssids);
+common::Owner<Platform> create_fake_platform(
+    FakeDevice& device, const std::vector<std::string>& ssids,
+    FakeRequestBehavior behavior = FakeRequestBehavior::kConnect);
 std::vector<WifiRequest> get_requests(Platform& platform);
 int active_requests(Platform& platform);
 }

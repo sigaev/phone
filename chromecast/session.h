@@ -49,6 +49,8 @@ struct Snapshot {
   std::string target, message;
   // Android is showing, or may show, a prompt to join a Wi-Fi network.
   bool prompt = false;
+  // Confirmed by this device's setup API, never inferred from a disconnect.
+  bool joined = false;
   // A failed join can be retried with another password.
   bool retry = false;
   // The stage that failed when stage is kFailed.

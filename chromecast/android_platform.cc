@@ -12,13 +12,12 @@ struct Platform {
   jobject context = nullptr;
   pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
   int next = 1;
-  // Pending intents of active requests, as global references.
+  // Network callbacks of active requests, as global references.
   std::vector<std::pair<int, jobject>> requests;
 };
 
 namespace {
 constexpr int kTransportWifi = 1, kCapabilityInternet = 12, kPatternPrefix = 1;
-constexpr int kFlagImmutable = 0x04000000;
 
 // The calling thread's JNI environment, attached for the duration of a call
 // when the thread does not belong to the Java VM.
@@ -314,31 +313,24 @@ common::Result<int> request_network(Platform& p, const WifiRequest& r) {
                      specifier)
           : nullptr;
   request = c.object(request, "build", "()Landroid/net/NetworkRequest;");
-  // Results arrive as a broadcast nobody receives; the network itself shows up
-  // in list_networks(), so no Java callback class is needed.
-  jstring package =
-      static_cast<jstring>(c.object(p.context, "getPackageName", "()Ljava/lang/String;"));
-  jobject intent = c.create("android/content/Intent", "(Ljava/lang/String;)V",
-                            c.string("dev.demo.chromecast.NETWORK"));
-  intent = package ? c.object(intent, "setPackage", "(Ljava/lang/String;)Landroid/content/Intent;",
-                              package)
-                   : nullptr;
+  // PendingIntent requests are released shortly after their broadcast is sent.
+  // A NetworkCallback keeps the connection alive until we unregister it. The
+  // framework's concrete base class suffices: the worker polls list_networks()
+  // and owns the deadline, so no application Java callback class is needed.
+  jobject callback = c.create("android/net/ConnectivityManager$NetworkCallback", "()V");
+  jobject manager = c.connectivity(p.context);
+  if (!request || !callback || !manager)
+    return failure(c.error.empty() ? "Android refused the Wi-Fi request" : c.error);
+  jobject kept = env->NewGlobalRef(callback);
+  if (!c.check() || !kept) return failure("Cannot keep the Wi-Fi request");
+  if (!c.call(manager, "requestNetwork",
+              "(Landroid/net/NetworkRequest;Landroid/net/ConnectivityManager$NetworkCallback;)V",
+              request, callback)) {
+    env->DeleteGlobalRef(kept);
+    return failure(c.error.empty() ? "Android refused the Wi-Fi request" : c.error);
+  }
   pthread_mutex_lock(&p.mutex);
   int id = p.next++;
-  pthread_mutex_unlock(&p.mutex);
-  jobject pending = intent ? c.statics("android/app/PendingIntent", "getBroadcast",
-                                       "(Landroid/content/Context;ILandroid/content/Intent;I)"
-                                       "Landroid/app/PendingIntent;",
-                                       p.context, id, intent, kFlagImmutable)
-                           : nullptr;
-  jobject manager = c.connectivity(p.context);
-  if (!request || !pending || !manager ||
-      !c.call(manager, "requestNetwork",
-              "(Landroid/net/NetworkRequest;Landroid/app/PendingIntent;)V", request, pending))
-    return failure(c.error.empty() ? "Android refused the Wi-Fi request" : c.error);
-  jobject kept = env->NewGlobalRef(pending);
-  if (!kept) return failure("Cannot keep the Wi-Fi request");
-  pthread_mutex_lock(&p.mutex);
   p.requests.emplace_back(id, kept);
   pthread_mutex_unlock(&p.mutex);
   return id;
@@ -346,24 +338,24 @@ common::Result<int> request_network(Platform& p, const WifiRequest& r) {
 
 void release_network(Platform& p, int id) {
   pthread_mutex_lock(&p.mutex);
-  jobject pending = nullptr;
+  jobject callback = nullptr;
   for (auto it = p.requests.begin(); it != p.requests.end(); ++it)
     if (it->first == id) {
-      pending = it->second;
+      callback = it->second;
       p.requests.erase(it);
       break;
     }
   pthread_mutex_unlock(&p.mutex);
-  if (!pending) return;
+  if (!callback) return;
   auto a = attach(p.vm);
   if (!a) return;
   JNIEnv* env = a->env;
   if (auto frame = push_frame(env, 8)) {
     Calls c{env};
     jobject manager = c.connectivity(p.context);
-    c.call(manager, "releaseNetworkRequest", "(Landroid/app/PendingIntent;)V", pending);
-    c.call(pending, "cancel", "()V");
+    c.call(manager, "unregisterNetworkCallback",
+           "(Landroid/net/ConnectivityManager$NetworkCallback;)V", callback);
   }
-  env->DeleteGlobalRef(pending);
+  env->DeleteGlobalRef(callback);
 }
 }

@@ -62,13 +62,14 @@ struct World {
 };
 
 World make_world(const FakeDeviceConfig& device, const std::vector<std::string>& phone,
-                 const std::string& directory) {
+                 const std::string& directory,
+                 FakeRequestBehavior behavior = FakeRequestBehavior::kConnect) {
   World w;
   auto created = create_fake_device(device);
   check(created.has_value(), "fake device starts");
   if (!created) return w;
   w.device = std::move(*created);
-  w.platform = create_fake_platform(*w.device, phone);
+  w.platform = create_fake_platform(*w.device, phone, behavior);
   SessionConfig config;
   config.directory = directory;
   config.https_port = https_port(*w.device);
@@ -115,6 +116,7 @@ void test_move_on_home_network(const std::string& directory) {
   FakeRecord record = get_record(*w.device);
   check(done.stage == Stage::kDone && current_ssid(*w.device) == "Upstairs",
         "the device moves to the new network");
+  check(done.joined && !done.prompt, "a completed join is confirmed and no longer asks to connect");
   check(record.last_password == "upstairs-pass" && record.connects == 1 &&
             !record.keep_hotspot_requested,
         "the password reaches the device encrypted with its key");
@@ -142,6 +144,7 @@ void test_wrong_password(const std::string& directory) {
         "a wrong password is reported with the old network");
   check(current_ssid(*w.device) == "Home" && get_record(*w.device).configured.size() == 1,
         "the device stays on its saved network");
+  check(!failed.joined, "a failed join is never confirmed");
   auto again = wait_for(s, rescan(s), Stage::kNetworks);
   check(again.networks.size() == 3, "trying again rescans");
   auto short_password = wait_for(s, join(s, index_of(again, "Upstairs"), "short"), Stage::kFailed);
@@ -212,6 +215,73 @@ void test_remembered(const std::string& directory) {
   check(failed.retry && failed.message.find("Wrong password") != std::string::npos,
         "a wrong password is reported from the hotspot");
 }
+
+// A disconnected device is not proof of joining. Android may refuse the
+// request, or accept it without ever connecting the phone to the new network.
+void test_unavailable_network(const std::string& directory, FakeRequestBehavior behavior,
+                              bool cancel) {
+  World w = make_world(home_device(), {"Home"}, directory, behavior);
+  if (!w.session) return;
+  Session& s = *w.session;
+  wait_for(s, search(s), Stage::kDevices);
+  auto listed = wait_for(s, open_device(s, 0), Stage::kNetworks);
+  auto command = join(s, index_of(listed, "Upstairs"), "upstairs-pass");
+  auto finding = wait_for(s, command, Stage::kFinding);
+  check(finding.stage == Stage::kFinding && !finding.joined,
+        "losing contact leaves the join unconfirmed during discovery");
+  if (cancel) {
+    // Wait until the outstanding Android request has actually started.
+    double deadline = monotonic() + 10;
+    while (active_requests(*w.platform) == 0 && monotonic() < deadline) {
+      pollfd waiting{session_fd(s), POLLIN, 0};
+      poll(&waiting, 1, 100);
+      take_snapshot(s);
+    }
+    check(active_requests(*w.platform) == 1, "the target network request is active");
+    auto devices = wait_for(s, search(s), Stage::kDevices);
+    check(devices.stage == Stage::kDevices && active_requests(*w.platform) == 0,
+          "leaving the flow releases the outstanding Wi-Fi request");
+  } else {
+    auto failed = wait_for(s, command, Stage::kFailed);
+    check(failed.stage == Stage::kFailed && failed.failed == Stage::kFinding && !failed.joined &&
+              !failed.prompt,
+          "an unavailable network ends discovery without claiming a confirmed join");
+    check(failed.message.find("Settings") != std::string::npos,
+          "a failed handoff explains how to reconnect manually");
+    if (behavior == FakeRequestBehavior::kError)
+      check(failed.message.find("Wi-Fi request refused") != std::string::npos,
+            "Android's request error is preserved");
+    check(get_requests(*w.platform).size() == 1 && active_requests(*w.platform) == 0,
+          "a failed handoff makes one request and releases it");
+  }
+  check(get_record(*w.device).saves == 0,
+        "an unreachable device is not treated as having completed setup");
+}
+
+void test_scan_failure(const std::string& directory, FakeScanBehavior behavior) {
+  auto config = home_device();
+  config.setup_mode = true;
+  config.scan = behavior;
+  World w = make_world(config, {"Home"}, directory);
+  if (!w.session) return;
+  Session& s = *w.session;
+  bool empty = behavior == FakeScanBehavior::kEmpty;
+  auto result = wait_for(s, open_device(s, -1), empty ? Stage::kNetworks : Stage::kFailed);
+  if (empty) {
+    check(result.stage == Stage::kNetworks && result.networks.empty() &&
+              result.message == "The Chromecast found no Wi-Fi networks.",
+          "a successful empty scan is reported as empty");
+  } else {
+    check(result.stage == Stage::kFailed && result.failed == Stage::kScanning && result.retry &&
+              result.message.find("found no Wi-Fi") == std::string::npos,
+          "a failed scan is not reported as finding no Wi-Fi networks");
+    const char* reason = behavior == FakeScanBehavior::kReject       ? "HTTP 403"
+                         : behavior == FakeScanBehavior::kDisconnect ? "Lost contact"
+                                                                     : "invalid";
+    check(result.message.find(reason) != std::string::npos, "the scan failure explains the cause");
+    check(active_requests(*w.platform) == 0, "a failed scan releases the hotspot request");
+  }
+}
 }
 
 int main() {
@@ -232,6 +302,12 @@ int main() {
   test_hotspot_keeps(third);
   test_remembered(third);
   test_hotspot_drops(second);
+  test_unavailable_network(second, FakeRequestBehavior::kError, false);
+  test_unavailable_network(second, FakeRequestBehavior::kWait, false);
+  test_unavailable_network(second, FakeRequestBehavior::kWait, true);
+  for (auto behavior : {FakeScanBehavior::kEmpty, FakeScanBehavior::kReject,
+                        FakeScanBehavior::kDisconnect, FakeScanBehavior::kInvalid})
+    test_scan_failure(second, behavior);
   std::string command = std::string("rm -rf ") + root;
   (void)!system(command.c_str());
   if (failures) return 1;

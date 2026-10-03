@@ -143,9 +143,19 @@ std::string decrypt(FakeDevice& d, const std::string& base64) {
 std::pair<int, std::string> handle(FakeDevice& d, std::string_view method, std::string_view path,
                                    std::string_view content_type, std::string_view body) {
   if (method == "GET" && path.starts_with("/setup/eureka_info")) return {200, info_json(d)};
-  if (method == "GET" && path == "/setup/scan_results") return {200, scan_json(d)};
+  if (method == "GET" && path == "/setup/scan_results") {
+    if (d.config.scan == FakeScanBehavior::kEmpty) return {200, "[]"};
+    if (d.config.scan == FakeScanBehavior::kInvalid) return {200, "{}"};
+    return {200, scan_json(d)};
+  }
   if (method == "GET" && path == "/setup/configured_networks") return {200, configured_json(d)};
-  if (method == "POST" && path == "/setup/scan_wifi") return {200, ""};
+  if (method == "POST" && path == "/setup/scan_wifi") {
+    if (d.config.scan == FakeScanBehavior::kReject) return {403, ""};
+    // The hotspot vanished after acknowledging the scan, as with an expired
+    // Android PendingIntent request. The scan itself would have found networks.
+    if (d.config.scan == FakeScanBehavior::kDisconnect) d.offline_until = monotonic() + 60;
+    return {200, ""};
+  }
   if (method == "POST" && path == "/setup/save_wifi") {
     ++d.record.saves;
     if (d.state == 61) {
@@ -464,6 +474,7 @@ std::string current_ssid(FakeDevice& d) {
 
 struct Platform {
   FakeDevice* device = nullptr;
+  FakeRequestBehavior behavior = FakeRequestBehavior::kConnect;
   pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
   struct Joined {
@@ -494,10 +505,12 @@ void destroy(Platform* p) noexcept {
 }
 
 common::Owner<Platform> create_fake_platform(FakeDevice& device,
-                                             const std::vector<std::string>& ssids) {
+                                             const std::vector<std::string>& ssids,
+                                             FakeRequestBehavior behavior) {
   common::Owner<Platform> p(new (std::nothrow) Platform);
   if (!p) return p;
   p->device = &device;
+  p->behavior = behavior;
   for (const std::string& ssid : ssids)
     p->networks.push_back({ssid, {0, p->next_address++, 24}, -1});
   sync(*p);
@@ -516,7 +529,15 @@ common::Result<int> request_network(Platform& p, const WifiRequest& r) {
   pthread_mutex_lock(&p.mutex);
   int id = p.next++;
   p.history.push_back(r);
+  if (p.behavior == FakeRequestBehavior::kError) {
+    pthread_mutex_unlock(&p.mutex);
+    return failure("Wi-Fi request refused");
+  }
   p.active.push_back(id);
+  if (p.behavior == FakeRequestBehavior::kWait) {
+    pthread_mutex_unlock(&p.mutex);
+    return id;
+  }
   FakeDevice& d = *p.device;
   pthread_mutex_lock(&d.mutex);
   bool hotspot = d.setup_mode && ((!r.bssid.empty() && r.bssid == d.config.hotspot_bssid) ||

@@ -314,7 +314,12 @@ bool join_hotspot(Session& s, Device& d) {
       WifiRequest named;
       named.ssid = d.info.name.empty() ? "Chromecast" : d.info.name;
       named.prefix = true;
-      if (auto again = request_network(*s.platform, named)) s.hotspot_request = *again;
+      auto again = request_network(*s.platform, named);
+      if (!again) {
+        fail(s, "Android did not start joining the hotspot: " + again.error().message, false);
+        return false;
+      }
+      s.hotspot_request = *again;
     }
     if (!pause(s, 1.5)) return false;
   }
@@ -332,15 +337,49 @@ void scan(Session& s) {
   s.work.networks.clear();
   publish(s);
   auto started = post(d.endpoint, "/setup/scan_wifi");
-  if (!started && !started.error().connected) {
-    fail(s, "Lost contact with " + name_of(d) + ".", false);
+  if (!started && !started.error().sent) {
+    fail(s, "Could not start the Wi-Fi scan: " + started.error().message, true);
+    return;
+  }
+  if (started && (started->status < 200 || started->status >= 300)) {
+    fail(s, "The Chromecast refused the Wi-Fi scan (HTTP " + std::to_string(started->status) + ").",
+         true);
     return;
   }
   std::vector<WifiNetwork> networks;
+  std::string error;
   for (int attempt = 0; attempt < 6 && networks.empty(); ++attempt) {
     if (!pause(s, attempt ? 2 : 3)) return;
     auto results = request(d.endpoint, "GET", "/setup/scan_results");
-    if (results && results->status == 200) networks = parse_scan(results->body);
+    if (!results) {
+      error = "Lost contact with " + name_of(d) +
+              " while reading its Wi-Fi scan. Try again to "
+              "reconnect.";
+      continue;
+    }
+    if (results->status != 200) {
+      error = "The Chromecast refused to return its Wi-Fi scan (HTTP " +
+              std::to_string(results->status) + ").";
+      continue;
+    }
+    auto parsed = parse_json(results->body);
+    const Json* list = parsed ? &*parsed : nullptr;
+    if (list && list->type == Json::Type::kObject)
+      for (const char* key : {"networks", "scan_results", "results"})
+        if (const Json* array = find(list, {key}); array && array->type == Json::Type::kArray) {
+          list = array;
+          break;
+        }
+    if (!list || list->type != Json::Type::kArray) {
+      error = "The Chromecast returned an invalid Wi-Fi scan. Try scanning again.";
+      continue;
+    }
+    error.clear();
+    networks = parse_scan(results->body);
+  }
+  if (!error.empty()) {
+    fail(s, std::move(error), true);
+    return;
   }
   s.work.networks = std::move(networks);
   s.work.message = s.work.networks.empty() ? "The Chromecast found no Wi-Fi networks." : "";
@@ -390,6 +429,8 @@ void run_open(Session& s, int index) {
 
 // Persist the joined network on the device and confirm it is saved.
 void finish(Session& s, Device& d, const WifiNetwork& target) {
+  s.work.joined = true;
+  s.work.prompt = false;
   s.work.stage = Stage::kSaving;
   s.work.device = d;
   publish(s);
@@ -431,6 +472,7 @@ void run_join(Session& s, int index, std::string password) {
   s.work.target = target.ssid;
   s.work.message.clear();
   s.work.retry = false;
+  s.work.joined = false;
   s.work.stage = Stage::kSending;
   publish(s);
   if (!supported(target)) {
@@ -469,7 +511,7 @@ void run_join(Session& s, int index, std::string password) {
     fail(s, "Could not send the network to " + name_of(d) + ": " + sent.error().message, false);
     return;
   }
-  // A dropped connection means it already left to join the new network.
+  // A dropped connection warrants rediscovery, but does not confirm a join.
   bool left = !sent;
   s.work.stage = Stage::kJoining;
   s.work.device = d;
@@ -549,17 +591,25 @@ void run_join(Session& s, int index, std::string password) {
       r.ssid = target.ssid;
       r.passphrase = password;
       r.wpa3 = target.auth == 10;
-      if (auto requested = request_network(*s.platform, r)) {
-        s.target_request = *requested;
-        s.work.prompt = true;
-        publish(s);
+      auto requested = request_network(*s.platform, r);
+      if (!requested) {
+        fail(s,
+             "Android could not join " + target.ssid + ": " + requested.error().message +
+                 ". Connect this phone to that Wi-Fi in Settings, then search again. "
+                 "The Chromecast's connection is not confirmed.",
+             false);
+        return;
       }
+      s.target_request = *requested;
+      s.work.prompt = true;
+      publish(s);
     }
     if (!pause(s, 2)) return;
   }
   fail(s,
        "Could not find " + name_of(d) + " on " + target.ssid +
-           ". It may still be connecting or installing an update. Search again in a minute.",
+           ". Its connection is not confirmed. Connect this phone to that Wi-Fi in Settings, "
+           "then search again. Check the TV for a connection error.",
        false);
 }
 

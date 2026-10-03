@@ -39,13 +39,17 @@ an on-screen keyboard with letters, digits, and every printable ASCII symbol,
 once the password is a valid WPA passphrase: 8 to 63 characters, or 64
 hexadecimal digits. Open networks skip the password.
 
+If contact is lost during a scan, or the device refuses it or returns invalid
+results, the app reports that failure and offers a retry. It only reports
+finding no networks after successfully reading an empty scan.
+
 The progress screen then shows four steps:
 
 1. **Send the network.** The app reads the Chromecast's RSA public key from
    `eureka_info`, encrypts the password with RSA PKCS#1 v1.5, and posts
    `connect_wifi`. The password never leaves the app in plain text. The
-   Chromecast may drop the connection while it switches networks, which counts
-   as accepted, as in the Google Home app.
+   Chromecast may drop the connection while it switches networks; the app
+   continues checking, without treating that disconnect as a successful join.
 2. **Join.** The app polls the Chromecast for up to 40 seconds and stops on a
    wrong password or another join failure. If the Chromecast reports
    `keep_hotspot_until_connected_supported`, the app asks it to keep its
@@ -53,9 +57,12 @@ The progress screen then shows four steps:
 3. **Find it on the new network.** The app looks on all of the phone's Wi-Fi
    networks, identifying the Chromecast by MAC address. If the phone is not on
    the new network, Android is asked after 15 seconds to join it for this app,
-   using the password just entered. Android shows another prompt. If the
+   using the password just entered. Android may show another prompt. If the
    Chromecast comes back on its old network, the join failed, and the app says
-   so.
+   so. The **Join** checkmark stays off until the device confirms its new
+   network. If Android refuses the phone's network request, the app reports
+   the error and explains how to connect through Settings. Discovery stops after
+   roughly three minutes when no device is found.
 4. **Save.** Once the Chromecast reports it is on the new network, the app
    calls `save_wifi` until `configured_networks` lists that network.
 
@@ -81,9 +88,12 @@ Wi-Fi network the app requested. The password is cleared after success.
   `android_setsocknetwork`. Wi-Fi networks, including the ones the app
   requested, come from `ConnectivityManager` through JNI.
 - Network requests use `ConnectivityManager.requestNetwork` with a
-  `WifiNetworkSpecifier` and a `PendingIntent` broadcast that nothing
-  receives. The requested network shows up in `getAllNetworks()`, so the app
-  needs no Java callback class.
+  `WifiNetworkSpecifier` and a retained framework `NetworkCallback`, released
+  with `unregisterNetworkCallback` when the flow ends. The concrete framework
+  callback keeps the request alive while the worker polls `getAllNetworks()`
+  with a deadline, so the app needs no Java callback class. A `PendingIntent`
+  request would be released by Android shortly after its broadcast, dropping
+  the connection before setup finishes.
 - Devices seen before are kept in `devices.json` in the app's private storage:
   name, model, MAC address, UDN, hotspot BSSID, and last network and address.
   No passwords or keys are stored.
@@ -138,7 +148,11 @@ The tests cover the following:
   - a wrong password that sends the device back to its old network;
   - setup through a hotspot that stays up;
   - setup through a hotspot that drops;
-  - reaching a remembered device's hotspot by BSSID.
+  - reaching a remembered device's hotspot by BSSID;
+  - refused or unanswered phone network requests, discovery timeouts, and
+    cancellation that releases an outstanding request without confirming a join.
+  - empty scans, rejected scans, malformed results, and a hotspot connection
+    lost between starting a scan and reading its results.
 - `app_test`: checks the layouts of every screen at five window sizes for
   overlap, safe areas, and hit targets. It then taps through the real app on the
   GPU with offscreen rendering, typing passwords with symbols on the on-screen
