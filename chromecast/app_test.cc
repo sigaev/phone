@@ -6,6 +6,8 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -219,6 +221,82 @@ void check_layouts() {
 std::string output_directory;
 constexpr int kAnyIndex = -1000;
 
+std::vector<unsigned char> wallpaper_pixels(int width, int height) {
+  std::vector<unsigned char> rgba(std::size_t(width) * height * 4);
+  for (int y = 0; y < height; ++y)
+    for (int x = 0; x < width; ++x) {
+      auto* p = rgba.data() + (std::size_t(y) * width + x) * 4;
+      float wave = .5f + .5f * std::sin(x * .035f + std::sin(y * .022f) * 2);
+      p[0] = 24 + int(110 * wave);
+      p[1] = 62 + int(100 * float(y) / height);
+      p[2] = 100 + int(100 * wave);
+      p[3] = 255;
+    }
+  return rgba;
+}
+
+void test_overlay() {
+  constexpr int kWidth = 256, kHeight = 384;
+  auto renderer = gpu::create_overlay_renderer(nullptr, kWidth, kHeight, true);
+  check(bool(renderer), "a translucent renderer starts");
+  if (!renderer) return;
+  auto& r = **renderer;
+  auto begin = [&](gpu::Color color, double time = 0) {
+    auto prepared = gpu::prepare_frame(r, false);
+    if (!prepared || !*prepared) return false;
+    auto begun = gpu::render_overlay(r, color, time);
+    return begun && *begun;
+  };
+  auto pixels = [&]() {
+    std::vector<unsigned char> rgba(kWidth * kHeight * 4);
+    auto presented = gpu::present(r);
+    check(presented && *presented, "the translucent frame presents");
+    check(bool(gpu::read_pixels(r, rgba)), "the translucent frame can be read");
+    return rgba;
+  };
+  check(begin({.8f, .6f, .4f, .25f}), "a translucent frame begins");
+  gpu::clip_ui(r, {32, 32, 64, 64});
+  gpu::draw_rect(r, {0, 0, kWidth, kHeight}, 0, {1, 1, 1, .5f});
+  gpu::clip_ui(r, {0, 0, kWidth, kHeight});
+  gpu::draw_rect(r, {128, 128, 16, 16}, 0, {0, 0, 0, 1});
+  auto clear = pixels();
+  auto at = [&](int x, int y, int component) { return clear[(y * kWidth + x) * 4 + component]; };
+  check(std::abs(at(8, 8, 0) - 51) <= 1 && std::abs(at(8, 8, 3) - 64) <= 1,
+        "the clear color is premultiplied and leaves the wallpaper visible");
+  check(std::abs(at(64, 64, 3) - 159) <= 1 && at(64, 64, 0) <= at(64, 64, 3),
+        "glass controls compose with premultiplied alpha");
+  check(at(64, 120, 3) == at(8, 8, 3), "scroll clipping preserves transparent surrounding pixels");
+  check(at(136, 136, 3) == 255, "fixed controls draw after resetting the list clip");
+  auto image = wallpaper_pixels(256, 384);
+  check(bool(gpu::set_overlay_image(r, 256, 384, image)), "the wallpaper uploads");
+  check(!gpu::set_overlay_image(r, 1, 1, image), "invalid uploads preserve the existing wallpaper");
+  check(begin({.96f, .98f, 1, .56f}, 0), "the water background draws");
+  auto first = pixels();
+  check(begin({.96f, .98f, 1, .56f}, 1. / 120), "the next display frame draws");
+  auto next = pixels();
+  check(begin({.96f, .98f, 1, .56f}, 10), "the later water background draws");
+  auto later = pixels();
+  unsigned changed = 0;
+  int maximum_step = 0;
+  for (std::size_t i = 0; i < first.size(); ++i) {
+    maximum_step = std::max(maximum_step, std::abs(int(first[i]) - int(next[i])));
+    changed += first[i] != later[i];
+    if (i % 4 == 3) check(first[i] == 255, "the selected image fills every background pixel");
+  }
+  check(changed > kWidth * kHeight / 10, "the ripples refract the selected image over time");
+  check(maximum_step <= 2, "the water moves gently between adjacent display frames");
+  check(begin({.96f, .98f, 1, .56f}, 200 * double(gpu::kPi)), "the wrapped water clock draws");
+  auto wrapped = pixels();
+  int wrap_difference = 0;
+  for (std::size_t i = 0; i < first.size(); ++i)
+    wrap_difference = std::max(wrap_difference, std::abs(int(first[i]) - int(wrapped[i])));
+  check(wrap_difference <= 1, "the water clock loops without a visible jump");
+  check(bool(gpu::set_overlay_image(r, 0, 0, {})), "the custom wallpaper can be removed");
+  check(begin({1, 1, 1, .5f}), "the system wallpaper fallback draws");
+  auto fallback = pixels();
+  check(std::abs(int(fallback[3]) - 128) <= 1, "removing the image restores window transparency");
+}
+
 void capture(App& app, const char* name) {
   if (output_directory.empty()) return;
   std::string path = output_directory + "/" + name + ".ppm";
@@ -323,6 +401,8 @@ World make_world(FakeDeviceConfig c, const std::vector<std::string>& phone,
   set_density(a, 3);
   set_touch_slop(a, 24);
   set_content(a, {0, 145, 1344, 2992 - 145 - 72});
+  check(bool(set_wallpaper(a, 512, 1024, wallpaper_pixels(512, 1024))),
+        "the app accepts a selected wallpaper");
   return w;
 }
 
@@ -345,6 +425,18 @@ void test_move(const std::string& directory) {
   check(pump(a, [&] { return find_widget(a, Target::kDevice, 0) != nullptr; }),
         "the Chromecast is listed");
   capture(a, "devices");
+  check(tap(a, find_widget(a, Target::kWallpaper)) && take_wallpaper_request(a) &&
+            !take_wallpaper_request(a),
+        "the Wallpaper control requests the picker once");
+  check(update(a, monotonic()), "the wallpaper keeps visible frames animating");
+  set_wallpaper_motion(a, false);
+  check(render(a) && !update(a, monotonic()),
+        "disabled system animations leave a static background");
+  detach_window(a);
+  check(!update(a, monotonic()), "a detached window does not request animation frames");
+  check(bool(attach_window(a, nullptr, 1344, 2992)) && render(a),
+        "the selected wallpaper survives surface recreation");
+  set_wallpaper_motion(a, true);
   check(tap(a, find_widget(a, Target::kDevice, 0)), "the device opens");
   check(pump(a, [&] { return network_row(a, "Upstairs") != nullptr; }), "its networks are listed");
   capture(a, "networks");
@@ -432,6 +524,7 @@ int main(int argc, char** argv) {
 #endif
   if (argc > 1) output_directory = argv[1];
   check_layouts();
+  test_overlay();
   const char* tmp = getenv("TEST_TMPDIR");
   if (!tmp) tmp = getenv("TMPDIR");
   std::string root =

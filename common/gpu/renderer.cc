@@ -87,6 +87,9 @@ constexpr std::uint32_t kUiVertex[] =
 constexpr std::uint32_t kUiFragment[] =
 #include "common/gpu/ui_frag.inc"
     ;
+constexpr std::uint32_t kWallpaperFragment[] =
+#include "common/gpu/wallpaper_frag.inc"
+    ;
 
 struct Buffer {
   VkDevice device = VK_NULL_HANDLE;
@@ -198,8 +201,9 @@ struct Renderer {
   VkPipeline mesh_pipeline = VK_NULL_HANDLE, shadow_pipeline = VK_NULL_HANDLE,
              sky_pipeline = VK_NULL_HANDLE, particle_pipeline = VK_NULL_HANDLE,
              compute_pipeline = VK_NULL_HANDLE, blur_pipeline = VK_NULL_HANDLE,
-             post_pipeline = VK_NULL_HANDLE, ui_pipeline = VK_NULL_HANDLE;
-  Owner<Image> hdr, ms_color, ms_depth, shadow, bloom[2], output, font;
+             post_pipeline = VK_NULL_HANDLE, ui_pipeline = VK_NULL_HANDLE,
+             wallpaper_pipeline = VK_NULL_HANDLE;
+  Owner<Image> hdr, ms_color, ms_depth, shadow, bloom[2], output, font, wallpaper;
   Owner<Buffer> particles;
   VkQueryPool queries = VK_NULL_HANDLE;
   std::array<Frame, kFrameCount> frames;
@@ -211,9 +215,17 @@ struct Renderer {
   bool maximum = false, recreate_surface = false, targets_ready = false, has_frame = false;
   // Overlay renderers draw only multisampled UI geometry to the output.
   bool overlay = false;
+  bool translucent = false;
   float gpu_millis = 0;
   std::vector<Mesh> meshes;
   std::vector<UiVertex> ui;
+
+  struct UiClip {
+    unsigned first;
+    Rect bounds;
+  };
+
+  std::vector<UiClip> ui_clips;
   Glyph glyphs[96]{};
   Mat4 model_transform;
   std::int64_t present_time = 0;
@@ -664,7 +676,7 @@ VkPipelineShaderStageCreateInfo shader_stage(VkShaderStageFlagBits stage,
   return info;
 }
 
-enum class Pipeline { kMesh, kShadow, kSky, kParticle, kBlur, kPost, kUi };
+enum class Pipeline { kMesh, kShadow, kSky, kParticle, kBlur, kPost, kUi, kWallpaper };
 
 Result<VkPipeline> create_pipeline(Renderer& r, std::span<const std::uint32_t> vertex,
                                    std::span<const std::uint32_t> fragment, Pipeline kind) {
@@ -721,7 +733,8 @@ Result<VkPipeline> create_pipeline(Renderer& r, std::span<const std::uint32_t> v
   VkPipelineMultisampleStateCreateInfo multisample{
       VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
   bool hdr = kind == Pipeline::kMesh || kind == Pipeline::kSky || particle;
-  multisample.rasterizationSamples = hdr || (ui && r.overlay) ? kSamples : VK_SAMPLE_COUNT_1_BIT;
+  multisample.rasterizationSamples =
+      hdr || ((ui || kind == Pipeline::kWallpaper) && r.overlay) ? kSamples : VK_SAMPLE_COUNT_1_BIT;
   VkPipelineDepthStencilStateCreateInfo depth{
       VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
   depth.depthTestEnable = mesh || particle;
@@ -732,7 +745,7 @@ Result<VkPipeline> create_pipeline(Renderer& r, std::span<const std::uint32_t> v
                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
   blend.blendEnable = ui || particle;
   blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-  // Source-over UI coverage preserves opaque alpha in the final image.
+  // Source-over coverage also produces premultiplied output for translucent windows.
   blend.srcAlphaBlendFactor = ui ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA;
   blend.dstColorBlendFactor = blend.dstAlphaBlendFactor =
       particle ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -831,7 +844,14 @@ Result<bool> create_swapchain(Renderer& r, const VkSurfaceCapabilitiesKHR& capab
   // Render in window coordinates. Android's compositor applies display rotation;
   // claiming currentTransform here would require rotating every output/UI vertex.
   info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-  info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  info.compositeAlpha =
+      r.translucent ? VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  if (!(capabilities.supportedCompositeAlpha & info.compositeAlpha)) {
+    // Android delegates alpha composition to the window/SurfaceView format.
+    if (capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)
+      info.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    else return fail("The Vulkan surface does not support the requested window transparency");
+  }
   info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
   info.clipped = VK_TRUE;
   info.oldSwapchain = r.swapchain;
@@ -1210,6 +1230,7 @@ void clear_instances(Renderer& renderer) {
   renderer.model_transform = Mat4{};
   for (auto& m : renderer.meshes) m.items.clear();
   renderer.ui.clear();
+  renderer.ui_clips.clear();
   renderer.triangle_count = 0;
 }
 
@@ -1225,6 +1246,14 @@ void draw_triangle(Renderer& renderer, float x0, float y0, float x1, float y1, f
   renderer.ui.insert(renderer.ui.end(), {{x0, y0, kWhite, kWhite, color},
                                          {x1, y1, kWhite, kWhite, color},
                                          {x2, y2, kWhite, kWhite, color}});
+}
+
+void clip_ui(Renderer& r, Rect bounds) {
+  if (r.ui_clips.empty() && !r.ui.empty())
+    r.ui_clips.push_back({0, {0, 0, float(r.width), float(r.height)}});
+  unsigned first = r.ui.size();
+  if (!r.ui_clips.empty() && r.ui_clips.back().first == first) r.ui_clips.back().bounds = bounds;
+  else r.ui_clips.push_back({first, bounds});
 }
 
 void draw_line(Renderer& renderer, float x0, float y0, float x1, float y1, float width,
@@ -1507,15 +1536,60 @@ Result<bool> render(Renderer& r, Vec3 eye, Vec3 target, double time, bool maximu
   return true;
 }
 
-Result<bool> render_overlay(Renderer& r, Color background) {
+Result<void> set_overlay_image(Renderer& r, int width, int height,
+                               std::span<const unsigned char> rgba) {
+  if (!r.overlay) return fail("Background images require an overlay renderer");
+  VK_CHECK(wait_for_work(r));
+  if (rgba.empty()) {
+    r.wallpaper.reset();
+    return {};
+  }
+  if (width <= 0 || height <= 0 || unsigned(width) > r.properties.limits.maxImageDimension2D ||
+      unsigned(height) > r.properties.limits.maxImageDimension2D ||
+      rgba.size() != std::size_t(width) * height * 4)
+    return fail("Invalid background image dimensions");
+  if (!r.wallpaper_pipeline) {
+    auto pipeline = create_pipeline(r, kFullVertex, kWallpaperFragment, Pipeline::kWallpaper);
+    if (!pipeline) return std::unexpected(pipeline.error());
+    r.wallpaper_pipeline = *pipeline;
+  }
+  auto image = create_image(r, width, height, kOutputFormat,
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+  if (!image) return std::unexpected(image.error());
+  auto staging = create_buffer(r, rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+  if (!staging) return std::unexpected(staging.error());
+  std::memcpy((*staging)->mapped, rgba.data(), rgba.size());
+  auto& frame = r.frames[r.frame_index];
+  if (auto result = begin_commands(r, frame); !result) return result;
+  transition(r, {image->get()}, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  VkBufferImageCopy copy{};
+  copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  copy.imageExtent = {unsigned(width), unsigned(height), 1};
+  vkCmdCopyBufferToImage(frame.command, (*staging)->handle, (*image)->handle,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+  transition(r, {image->get()}, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+             VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
+  if (auto result = submit_immediate(r, frame); !result) return result;
+  r.wallpaper = std::move(*image);
+  return {};
+}
+
+Result<bool> render_overlay(Renderer& r, Color background, double time) {
   if (!r.overlay) return fail("Overlay frames require an overlay renderer");
   // Overlay frames have no scene instances; discard the previous frame's UI.
   r.ui.clear();
+  r.ui_clips.clear();
   auto begun = begin_frame(r, false);
   if (!begun || !*begun) return begun;
   auto& frame = r.frames[r.frame_index];
   Constants constants{};
   constants.size = {1, 0, float(r.width), float(r.height)};
+  if (r.wallpaper) {
+    constants.size.r = float(r.wallpaper->extent.width);
+    constants.size.g = float(r.wallpaper->extent.height);
+    constants.parameters = background;
+    constants.eye_time.a = oscillation_time(time);
+  }
   if (auto result = begin_commands(r, frame); !result) return std::unexpected(result.error());
   vkCmdResetQueryPool(frame.command, r.queries, r.frame_index * 2, 2);
   vkCmdWriteTimestamp(frame.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, r.queries,
@@ -1523,7 +1597,13 @@ Result<bool> render_overlay(Renderer& r, Color background) {
   vkCmdPushConstants(frame.command, r.pipeline_layout, VK_SHADER_STAGE_ALL, 0, sizeof(constants),
                      &constants);
   // present() draws the UI and resolves the multisampled color into the output.
-  begin_pass(r, r.ms_color.get(), nullptr, &output(r), background);
+  Color clear{background.r * background.a, background.g * background.a, background.b * background.a,
+              background.a};
+  begin_pass(r, r.ms_color.get(), nullptr, &output(r), clear);
+  if (r.wallpaper) {
+    bind(r, r.wallpaper_pipeline, {sampled(r.sampler, *r.wallpaper)});
+    vkCmdDraw(frame.command, 3, 1, 0, 0);
+  }
   return true;
 }
 
@@ -1539,7 +1619,19 @@ Result<bool> present(Renderer& r) {
     bind(r, r.ui_pipeline, {sampled(r.sampler, *r.font)});
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(frame.command, 0, 1, &frame.ui->handle, &offset);
-    vkCmdDraw(frame.command, r.ui.size(), 1, 0, 0);
+    if (r.ui_clips.empty()) r.ui_clips.push_back({0, {0, 0, float(r.width), float(r.height)}});
+    for (std::size_t i = 0; i < r.ui_clips.size(); ++i) {
+      const auto& clip = r.ui_clips[i];
+      unsigned end = i + 1 < r.ui_clips.size() ? r.ui_clips[i + 1].first : r.ui.size();
+      int left = std::clamp(int(std::ceil(clip.bounds.x)), 0, r.width);
+      int top = std::clamp(int(std::ceil(clip.bounds.y)), 0, r.height);
+      int right = std::clamp(int(std::floor(clip.bounds.x + clip.bounds.w)), left, r.width);
+      int bottom = std::clamp(int(std::floor(clip.bounds.y + clip.bounds.h)), top, r.height);
+      if (end == clip.first || right == left || bottom == top) continue;
+      VkRect2D scissor{{left, top}, {unsigned(right - left), unsigned(bottom - top)}};
+      vkCmdSetScissor(frame.command, 0, 1, &scissor);
+      vkCmdDraw(frame.command, end - clip.first, 1, clip.first, 0);
+    }
   }
   end_pass(r, output(r),
            r.window ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1654,11 +1746,12 @@ Result<void> create_scene_resources(Renderer& r, SceneShaders shaders) {
 using SceneSetup = Result<void> (*)(Renderer&, SceneShaders);
 
 Result<Owner<Renderer>> create(ANativeWindow* window, int offscreen_width, int offscreen_height,
-                               SceneSetup scene, SceneShaders shaders) {
+                               SceneSetup scene, SceneShaders shaders, bool translucent = false) {
   Owner<Renderer> renderer(new (std::nothrow) Renderer);
   if (!renderer) return fail("Cannot allocate renderer state");
   auto& r = *renderer;
   r.overlay = !scene;
+  r.translucent = translucent;
   r.window = window;
   r.width = offscreen_width;
   r.height = offscreen_height;
@@ -1682,8 +1775,8 @@ Result<Owner<Renderer>> create_renderer(ANativeWindow* window, SceneShaders shad
 }
 
 Result<Owner<Renderer>> create_overlay_renderer(ANativeWindow* window, int offscreen_width,
-                                                int offscreen_height) {
-  return create(window, offscreen_width, offscreen_height, nullptr, {});
+                                                int offscreen_height, bool translucent) {
+  return create(window, offscreen_width, offscreen_height, nullptr, {}, translucent);
 }
 
 void destroy(Renderer* renderer) noexcept {
@@ -1698,6 +1791,7 @@ void destroy(Renderer* renderer) noexcept {
     destroy_targets(r);
     r.meshes.clear();
     r.font.reset();
+    r.wallpaper.reset();
     r.particles.reset();
     for (auto& frame : r.frames) {
       frame.instances.reset();
@@ -1709,7 +1803,8 @@ void destroy(Renderer* renderer) noexcept {
     }
     vkDestroyQueryPool(r.device, r.queries, nullptr);
     for (auto pipeline : {r.mesh_pipeline, r.shadow_pipeline, r.sky_pipeline, r.particle_pipeline,
-                          r.compute_pipeline, r.blur_pipeline, r.post_pipeline, r.ui_pipeline})
+                          r.compute_pipeline, r.blur_pipeline, r.post_pipeline, r.ui_pipeline,
+                          r.wallpaper_pipeline})
       vkDestroyPipeline(r.device, pipeline, nullptr);
     vkDestroySampler(r.device, r.sampler, nullptr);
     vkDestroySampler(r.device, r.shadow_sampler, nullptr);

@@ -12,7 +12,8 @@ directories:
   and `Error` for `std::expected` error handling, and Android runtime support.
 - `common/gpu/` provides the shared Vulkan 1.4 renderer, mesh primitives,
   shadows, HDR, bloom, compute particles, and GPU text drawing. Its overlay
-  mode draws only multisampled 2D shapes and text, for flat interfaces.
+  mode draws multisampled 2D shapes and text, with optional translucent windows
+  and an image background with gentle water refraction.
 - `tools/spirv.bzl` compiles every shader during the Bazel build with Khronos's
   glslang 16.6.0 (fetched with a SHA-256 and built by
   `tools/glslang.BUILD.bazel`), then optimizes the SPIR-V with `spirv-opt -Os`

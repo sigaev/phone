@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <new>
+#include <utility>
 
 #include "common/gpu/renderer.h"
 
@@ -12,7 +13,7 @@ using common::Owner;
 using common::Result;
 
 namespace {
-constexpr gpu::Color kBackground{1, 1, 1};
+constexpr gpu::Color kBackground{.96f, .98f, 1, .56f};
 // Shift tapped twice within this time locks capitals.
 constexpr double kDoubleTap = .35;
 // Holding delete repeats it after a delay.
@@ -44,6 +45,9 @@ struct App {
   float down_x = 0, down_y = 0, scroll_start = 0;
   double repeat_at = -1;
   bool paste_requested = false;
+  bool wallpaper_requested = false, wallpaper_motion = true;
+  std::vector<unsigned char> wallpaper;
+  int wallpaper_width = 0, wallpaper_height = 0;
   int blink = -1;
 };
 
@@ -170,6 +174,9 @@ void activate(App& a, Hit hit) {
     case Target::kPaste:
       a.paste_requested = true;
       break;
+    case Target::kWallpaper:
+      a.wallpaper_requested = true;
+      break;
     case Target::kConnect:
       connect(a);
       break;
@@ -220,8 +227,13 @@ void destroy(App* app) noexcept {
 Result<void> attach_window(App& a, ANativeWindow* window, int width, int height) {
   a.renderer.reset();
   a.laid_out = false;
-  auto renderer = gpu::create_overlay_renderer(window, width, height);
+  auto renderer = gpu::create_overlay_renderer(window, width, height, true);
   if (!renderer) return std::unexpected(renderer.error());
+  if (!a.wallpaper.empty()) {
+    auto uploaded =
+        gpu::set_overlay_image(**renderer, a.wallpaper_width, a.wallpaper_height, a.wallpaper);
+    if (!uploaded) return uploaded;
+  }
   a.renderer = std::move(*renderer);
   a.dirty = true;
   return {};
@@ -331,6 +343,28 @@ bool take_paste_request(App& a) {
   return requested;
 }
 
+bool take_wallpaper_request(App& a) { return std::exchange(a.wallpaper_requested, false); }
+
+Result<void> set_wallpaper(App& a, int width, int height, std::vector<unsigned char> rgba) {
+  if (!rgba.empty() && (width <= 0 || height <= 0 || width > 2048 || height > 2048 ||
+                        rgba.size() != std::size_t(width) * height * 4))
+    return std::unexpected(Error{"The wallpaper image has invalid dimensions"});
+  if (a.renderer) {
+    auto uploaded = gpu::set_overlay_image(*a.renderer, width, height, rgba);
+    if (!uploaded) return uploaded;
+  }
+  a.wallpaper = std::move(rgba);
+  a.wallpaper_width = width;
+  a.wallpaper_height = height;
+  a.dirty = true;
+  return {};
+}
+
+void set_wallpaper_motion(App& a, bool enabled) {
+  a.wallpaper_motion = enabled;
+  a.dirty = true;
+}
+
 void paste(App& a, const std::string& text) {
   if (screen(a) != Screen::kPassword) return;
   // Passwords copied from elsewhere often carry a trailing newline.
@@ -365,7 +399,7 @@ bool update(App& a, double now) {
     a.repeat_at = now + kRepeatInterval;
     a.dirty = true;
   }
-  bool animating = false;
+  bool animating = a.wallpaper_motion && !a.wallpaper.empty();
   for (const Widget& w : a.layout.widgets)
     if (w.kind == Kind::kSpinner || (w.kind == Kind::kStep && w.status == 1)) animating = true;
   if (screen(a) == Screen::kPassword) {
@@ -393,7 +427,7 @@ Result<bool> draw(App& a, double now) {
     in.scroll = limit;
     layout = layout_view(stats.width, stats.height, a.content, a.density, in);
   }
-  auto begun = gpu::render_overlay(r, kBackground);
+  auto begun = gpu::render_overlay(r, kBackground, a.wallpaper_motion ? now : 0);
   if (!begun || !*begun) return begun;
   draw_view(r, layout, a.pressed, now);
   auto presented = gpu::present(r);

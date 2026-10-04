@@ -13,20 +13,21 @@ using gpu::Renderer;
 namespace {
 constexpr Color kWhite{1, 1, 1};
 constexpr Color kInk{.122f, .122f, .122f};
-constexpr Color kGray{.373f, .388f, .408f};
+constexpr Color kGray{.12f, .14f, .17f};
 constexpr Color kFaint{.741f, .757f, .776f};
 constexpr Color kBlue{.102f, .451f, .910f};
 constexpr Color kBluePressed{.082f, .341f, .690f};
-constexpr Color kCard{.945f, .953f, .957f};
-constexpr Color kCardPressed{.871f, .886f, .902f};
-constexpr Color kLine{.855f, .863f, .878f};
+constexpr Color kLinkInk{.03f, .14f, .32f};
+constexpr Color kCard{.97f, .985f, 1, .64f};
+constexpr Color kCardPressed{.82f, .89f, .96f, .82f};
+constexpr Color kLine{.65f, .72f, .80f, .50f};
 constexpr Color kGreen{.094f, .502f, .220f};
 constexpr Color kRed{.851f, .188f, .145f};
-constexpr Color kKey{.910f, .918f, .929f};
-constexpr Color kKeySpecial{.808f, .820f, .843f};
-constexpr Color kKeyPressed{.690f, .710f, .741f};
-constexpr Color kSuccessPanel{.902f, .957f, .918f};
-constexpr Color kErrorPanel{.992f, .918f, .910f};
+constexpr Color kKey{.97f, .985f, 1, .68f};
+constexpr Color kKeySpecial{.78f, .85f, .94f, .72f};
+constexpr Color kKeyPressed{.66f, .76f, .88f, .88f};
+constexpr Color kSuccessPanel{.902f, .957f, .918f, .84f};
+constexpr Color kErrorPanel{.992f, .918f, .910f, .86f};
 
 constexpr float kListGap = 10, kBottomBar = 84;
 
@@ -112,7 +113,8 @@ void layout_devices(Builder& b, const ViewInput& in) {
         searching           ? "Looking on this phone's Wi-Fi..."
         : s.devices.empty() ? "No Chromecast found"
                             : "Choose a Chromecast to move to another network");
-  float y = b.list(96, in.scroll);
+  b.row(Kind::kLink, 84, 44, "Wallpaper", Target::kWallpaper);
+  float y = b.list(140, in.scroll);
   for (std::size_t i = 0; i < s.devices.size(); ++i) {
     const Device& d = s.devices[i];
     Widget& w =
@@ -125,7 +127,7 @@ void layout_devices(Builder& b, const ViewInput& in) {
   }
   b.l.list_height = s.devices.empty() ? 0 : s.devices.size() * (76 + kListGap) - kListGap;
   if (s.devices.empty() && !searching)
-    b.row(Kind::kText, 104, 120,
+    b.row(Kind::kText, 148, 120,
           "No Chromecast answered on this phone's Wi-Fi. If yours cannot reach its network, "
           "tap Setup hotspot.");
   b.bottom(Kind::kButton, "Search again", Target::kSearch, !searching, Kind::kButton,
@@ -485,14 +487,14 @@ void draw_widget(const Painter& p, const Widget& w, Hit pressed, double time) {
       Color fill = primary ? (w.enabled ? (down ? kBluePressed : kBlue) : kLine)
                            : (down ? kCardPressed : kCard);
       gpu::draw_rect(p.r, b, b.h * .5f, fill);
-      Color ink = primary ? kWhite : w.enabled ? kBlue : kFaint;
+      Color ink = primary ? kWhite : w.enabled ? kLinkInk : kFaint;
       p.text(p.fit(w.label, b.w - p.px(16), p.px(12)), center_x(b), center_y(b), p.px(12), ink, 0);
       break;
     }
     case Kind::kLink:
       if (down) gpu::draw_rect(p.r, b, std::min(b.w, b.h) * .5f, kCard);
       if (w.target == Target::kBack) p.chevron(center_x(b), center_y(b), p.px(26), kInk);
-      else p.text(w.label, center_x(b), center_y(b), p.px(12), kBlue, 0);
+      else p.text(w.label, center_x(b), center_y(b), p.px(12), kLinkInk, 0);
       break;
     case Kind::kRow: {
       gpu::draw_rect(p.r, b, p.px(14), down ? kCardPressed : kCard);
@@ -642,14 +644,14 @@ Hit hit_test(const Layout& l, float x, float y) {
 
 void draw_view(Renderer& r, const Layout& l, Hit pressed, double time) {
   Painter p{r, l.scale, gpu::measure_text(r, "H", 100).h / 100};
+  gpu::clip_ui(r, l.list);
   for (const Widget& w : l.widgets)
     if (w.scrolls) draw_widget(p, w, pressed, time);
-  // Fixed widgets cover rows scrolled past the list's edges.
+  // Clip scrolling rows instead of hiding them beneath opaque header/footer panels.
+  gpu::clip_ui(r, l.screen);
   if (l.list.h > 0) {
-    gpu::draw_rect(r, {0, 0, l.screen.w, l.list.y}, 0, kWhite);
     float bottom = l.list.y + l.list.h;
-    gpu::draw_rect(r, {0, bottom, l.screen.w, l.screen.h - bottom}, 0, kWhite);
-    gpu::draw_rect(r, {0, bottom, l.screen.w, std::max(1.f, p.px(.5f))}, 0, kLine);
+    gpu::draw_rect(r, {l.list.x, bottom, l.list.w, std::max(1.f, p.px(.5f))}, 0, kLine);
   }
   for (const Widget& w : l.widgets)
     if (!w.scrolls) draw_widget(p, w, pressed, time);

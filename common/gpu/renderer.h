@@ -38,7 +38,8 @@ common::Result<common::Owner<Renderer>> create_renderer(ANativeWindow* window, S
 // to the window, without scene, shadow, particle, or post-processing passes.
 common::Result<common::Owner<Renderer>> create_overlay_renderer(ANativeWindow* window,
                                                                 int offscreen_width = 0,
-                                                                int offscreen_height = 0);
+                                                                int offscreen_height = 0,
+                                                                bool translucent = false);
 void destroy(Renderer* renderer) noexcept;
 common::Result<MeshId> create_mesh(Renderer& renderer, std::span<const Vertex> vertices,
                                    std::span<const unsigned> indices);
@@ -60,7 +61,14 @@ common::Result<bool> prepare_frame(Renderer& renderer, bool maximum);
 common::Result<bool> render(Renderer& renderer, Vec3 eye, Vec3 target, double time, bool maximum);
 // Begin an overlay renderer's frame cleared to background, after
 // prepare_frame(renderer, false). Draw its contents, then present().
-common::Result<bool> render_overlay(Renderer& renderer, Color background);
+// With an image, background is its translucent tint; time drives the water motion.
+common::Result<bool> render_overlay(Renderer& renderer, Color background, double time = 0);
+// Supply tightly packed RGBA pixels for the gently refracted overlay background.
+// Empty pixels remove it. Upload only between frames; this waits for earlier GPU work.
+common::Result<void> set_overlay_image(Renderer& renderer, int width, int height,
+                                       std::span<const unsigned char> rgba);
+// Clip subsequent UI geometry in window pixels; reset to the full window to stop clipping.
+void clip_ui(Renderer& renderer, Rect bounds);
 void draw_rect(Renderer& renderer, Rect bounds, float radius, Color color);
 void draw_triangle(Renderer& renderer, float x0, float y0, float x1, float y1, float x2, float y2,
                    Color color);

@@ -110,6 +110,10 @@ cc_library(
 cc_library(
     name = "chromecast_lib",
     srcs = ["main.cc"],
+    linkopts = [
+        "-ljnigraphics",
+        "-lnativewindow",
+    ],
     linkstatic = True,
     target_compatible_with = ["@platforms//os:android"],
     deps = [
@@ -123,9 +127,11 @@ cc_library(
 
 android_binary(
     name = "chromecast",
+    srcs = ["ChromecastActivity.java"],
     custom_package = "dev.demo.chromecast",
     generate_art_profile = False,
     manifest = "main.xml",
+    resource_files = ["res/values/styles.xml"],
     visibility = ["//visibility:public"],
     deps = [":chromecast_lib"],
 )

@@ -22,6 +22,7 @@ enum class Target {
   kRescan,
   kReveal,
   kPaste,
+  kWallpaper,
   kConnect,
   kKey,
   kRetry,

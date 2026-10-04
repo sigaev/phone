@@ -24,6 +24,8 @@ int window_width = 320, window_height = 720, buffer_width = 320, buffer_height =
 VkSurfaceTransformFlagBitsKHR transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 VkResult acquire_result = VK_SUCCESS, present_result = VK_SUCCESS, creation_result = VK_SUCCESS;
 unsigned creations = 0, presentation_waits = 0;
+VkCompositeAlphaFlagsKHR composite_alpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+VkCompositeAlphaFlagBitsKHR chosen_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 // The desired presentation time of the last present, or zero without one.
 uint64_t desired_present_time = 0;
 // Display timing reports that the next query returns, for a 120 Hz display.
@@ -161,7 +163,7 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
       VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR |
       VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
   capabilities->currentTransform = cache_capabilities ? cached_transform : transform;
-  capabilities->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  capabilities->supportedCompositeAlpha = composite_alpha;
   return VK_SUCCESS;
 }
 
@@ -173,6 +175,9 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateSwapchainKHR(VkDevice device,
   auto result = creation_result;
   creation_result = VK_SUCCESS;
   if (result != VK_SUCCESS) return result;
+  require(info->compositeAlpha & composite_alpha,
+          "Swapchain selected unsupported alpha composition");
+  chosen_alpha = info->compositeAlpha;
   require(
       info->imageExtent.width == unsigned(cache_capabilities ? cached_width : window_width) &&
           info->imageExtent.height == unsigned(cache_capabilities ? cached_height : window_height),
@@ -369,6 +374,23 @@ int main() {
 #endif
   using namespace native_buttons;
   auto* window = reinterpret_cast<ANativeWindow*>(1);
+  for (auto alpha :
+       {VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR}) {
+    composite_alpha = alpha;
+    auto renderer = gpu::create_overlay_renderer(window, 0, 0, true);
+    require(bool(renderer) && chosen_alpha == alpha, "Translucent swapchain composition failed");
+    auto prepared = gpu::prepare_frame(**renderer, false);
+    require(prepared && *prepared, "Translucent surface preparation failed");
+    auto begun = gpu::render_overlay(**renderer, {1, 1, 1, .5f});
+    require(begun && *begun, "Translucent frame failed");
+    auto presented = gpu::present(**renderer);
+    require(presented && *presented, "Translucent frame did not present");
+  }
+  composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  require(!gpu::create_overlay_renderer(window, 0, 0, true),
+          "A surface without alpha support silently made the wallpaper opaque");
+  // Real Android surfaces delegate composition to the window's format.
+  composite_alpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
   hide_maintenance = true;
   require(!gpu::create_renderer(window, get_scene_shaders()),
           "Missing presentation support was accepted");

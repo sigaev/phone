@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "chromecast/session.h"
 #include "chromecast/view.h"
@@ -40,6 +41,11 @@ void enter(App& app);
 // Paste was tapped; the caller reads the clipboard and calls paste().
 bool take_paste_request(App& app);
 void paste(App& app, const std::string& text);
+// The wallpaper button requests Android's image picker; a copy stays private to this app.
+bool take_wallpaper_request(App& app);
+common::Result<void> set_wallpaper(App& app, int width, int height,
+                                   std::vector<unsigned char> rgba);
+void set_wallpaper_motion(App& app, bool enabled);
 // Readable when the session has news; then call on_session().
 int app_fd(const App& app);
 void on_session(App& app);

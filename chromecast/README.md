@@ -6,10 +6,24 @@ talks to the Chromecast's local `/setup/*` API, the one the Google Home app
 uses during setup, so it needs no Google account, cloud service, or
 Bluetooth. It is based on the terminal tool in `/root/chromecast`, which
 set up this phone's Chromecast (`Chromecast6745`, an `anchovy` device on
-firmware 1.36) on 2026-09-24. Like the other apps, it uses Android's built-in
-`NativeActivity`, so the APK has no Java sources or DEX code.
+firmware 1.36) on 2026-09-24. The interface and networking use C++; a small
+`NativeActivity` subclass handles Android's photo picker and image decoding.
 
 ## Using it
+
+The window shows your system wallpaper through a light translucent veil, with
+glass-like cards and buttons. Tap **Wallpaper → Choose image for ripples** and
+choose your wallpaper image to give it a very gentle moving-water reflection.
+The image is centered and cropped to fill the window. Only the background bends;
+text and controls stay still. A private copy, resized to at most 2048 pixels on
+its longest edge, is remembered across launches without any storage permission.
+**System wallpaper (still)** removes that copy and restores the live system
+wallpaper behind the translucent window. Android does not allow this app to read
+the system wallpaper's pixels directly for distortion.
+
+Wallpaper motion follows the display's presentation timelines, using Native Buttons'
+peak-refresh-rate and adaptive whole-refresh frame pacing. It stops when the app
+is paused and respects Android's disabled-animation setting.
 
 The first screen lists the Chromecasts on every Wi-Fi network the phone has,
 plus the ones the app has seen before:
@@ -131,7 +145,11 @@ directory: a JSON parser, the HTTP client, mDNS, and the setup flows.
   operations. `android_platform` implements them with JNI.
 - `view` lays out, hit-tests, and draws the screens with `//common/gpu`'s
   overlay renderer. `app` handles navigation, scrolling, and the keyboard.
-  `main.cc` is the `NativeActivity` glue, adapted from Sudoku's.
+  `main.cc` integrates `NativeActivity`, the image bridge, and display-synchronized
+  frame pacing. `ChromecastActivity.java` decodes the chosen photo off the UI
+  thread, saves it atomically, and passes software bitmap pixels to native code.
+  The shared renderer uploads the image once and applies the water shader before
+  drawing the UI. Scrollable rows use scissor clipping to preserve transparency.
 - `fakes` is a test-only simulated Chromecast and phone. The Chromecast is an
   HTTPS and HTTP server on loopback addresses that stand for its home-network
   address and its hotspot. It has a real RSA key, decrypts the passwords it
@@ -149,7 +167,7 @@ bazel build //chromecast
 bazel test //chromecast:protocol_test //chromecast:session_test //chromecast:app_test
 ```
 
-Output: `bazel-bin/chromecast/chromecast.apk`, about 160 KiB. The application
+Output: `bazel-bin/chromecast/chromecast.apk`. The application
 ID is `dev.demo.chromecast`. The minimum and target Android API is 36. Android
 grants all of its permissions at install:
 
@@ -176,7 +194,10 @@ The tests cover the following:
   - rejected and unconfirmed saves, verification after the last save attempt,
     and update or setup requirements after Wi-Fi is saved.
 - `app_test`: checks the layouts of every screen at five window sizes for
-  overlap, safe areas, and hit targets. It then taps through the real app on the
+  overlap, safe areas, and hit targets. GPU checks cover premultiplied transparency,
+  scroll clipping, wallpaper upload/removal, gentle animation and clock wrapping,
+  disabled motion, and preserving the image across surface recreation.
+  It then taps through the real app on the
   GPU with offscreen rendering, typing passwords with symbols on the on-screen
   keyboard. Pass a directory to save PPM screenshots:
 

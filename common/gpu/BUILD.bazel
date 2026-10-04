@@ -13,6 +13,7 @@ load("//tools:spirv.bzl", "glslang_shader")
     "particle.frag",
     "ui.vert",
     "ui.frag",
+    "wallpaper.frag",
 ]]
 
 cc_library(
@@ -28,6 +29,7 @@ cc_library(
         ":post_frag",
         ":ui_frag",
         ":ui_vert",
+        ":wallpaper_frag",
     ],
     hdrs = [
         "math.h",
