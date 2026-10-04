@@ -2,7 +2,6 @@
 #include <dlfcn.h>
 #endif
 #include <poll.h>
-#include <psa/crypto.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -432,7 +431,6 @@ int main(int argc, char** argv) {
   }
 #endif
   if (argc > 1) output_directory = argv[1];
-  if (psa_crypto_init() != PSA_SUCCESS) return 1;
   check_layouts();
   const char* tmp = getenv("TEST_TMPDIR");
   if (!tmp) tmp = getenv("TMPDIR");

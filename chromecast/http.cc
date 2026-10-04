@@ -10,7 +10,6 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
-#include <psa/crypto.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -93,8 +92,6 @@ bool finish_connect(int fd, int timeout_ms) {
 }
 
 std::expected<void, HttpError> start_tls(Connection& c) {
-  // TLS 1.3 code in mbedTLS needs PSA initialized; repeated calls return at once.
-  if (psa_crypto_init() != PSA_SUCCESS) return failure("Cannot initialize cryptography");
   mbedtls_entropy_init(&c.entropy);
   mbedtls_ctr_drbg_init(&c.drbg);
   mbedtls_ssl_config_init(&c.config);
@@ -145,9 +142,6 @@ int read_some(Connection& c, char* buffer, std::size_t size) {
     }
     int n = mbedtls_ssl_read(&c.ssl, reinterpret_cast<unsigned char*>(buffer), size);
     if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-#if defined(MBEDTLS_SSL_PROTO_TLS1_3)
-    if (n == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
-#endif
     if (n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == MBEDTLS_ERR_NET_CONN_RESET) return 0;
     return n < 0 ? -1 : n;
   }

@@ -44,6 +44,15 @@ bazel_dep(name = "spirv_tools", version = "2026.1")
 bazel_dep(name = "hermetic_android_toolchains", version = "0.4.0", dev_dependency = True)
 
 bazel_dep(name = "mbedtls", version = "3.6.7")
+
+# TLS configuration belongs to target binaries, not build-time shader tools.
+single_version_override(
+    module_name = "mbedtls",
+    patch_strip = 1,
+    patches = ["//tools/patches:mbedtls_target_config.patch"],
+    version = "3.6.7",
+)
+
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_android", version = "0.7.3")
 bazel_dep(name = "rules_android_ndk", version = "0.1.5")

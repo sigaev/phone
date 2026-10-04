@@ -1,0 +1,10 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -40,6 +40,7 @@
+ label_flag(
+     name = "mbedtls_config",
+     build_setting_default = ":mbedtls_default_config",
++    scope = "target",
+     visibility = ["//visibility:public"],
+ )
+ 

@@ -107,7 +107,18 @@ Wi-Fi network the app requested. The password is cleared after success.
   No passwords or keys are stored.
 
 TLS and RSA come from [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) 3.6.7,
-fetched as a Bazel Central Registry module. Everything else is in this
+fetched as a Bazel Central Registry module. `.bazelrc` selects the explicit
+allowlist in `mbedtls_config.h`: a TLS 1.2 client with AES-GCM/CBC, RSA,
+DHE-RSA, ECDHE-RSA, and ECDHE-ECDSA, plus RSA PKCS#1 password encryption.
+It retains SHA-1/256/384/512 and P-256/P-384/P-521/X25519 for compatibility
+with Cast firmware, while omitting TLS 1.3, DTLS, server handshakes, PSK,
+PSA and its persistent key store, other cipher families, and unused curves.
+The TLS record buffer sizes remain at their defaults.
+
+`mbedtls_test_config.h` adds only the server and key/certificate generation
+needed by the fakes. `tools/mbedtls.bzl` applies that configuration to each
+test and its dependencies, so normal `bazel test` and `bazel run` commands
+work without putting the server in the APK. Everything else is in this
 directory: a JSON parser, the HTTP client, mDNS, and the setup flows.
 
 ## Code
@@ -138,7 +149,7 @@ bazel build //chromecast
 bazel test //chromecast:protocol_test //chromecast:session_test //chromecast:app_test
 ```
 
-Output: `bazel-bin/chromecast/chromecast.apk`, about 260 KB. The application
+Output: `bazel-bin/chromecast/chromecast.apk`, about 160 KiB. The application
 ID is `dev.demo.chromecast`. The minimum and target Android API is 36. Android
 grants all of its permissions at install:
 
@@ -152,6 +163,7 @@ The tests cover the following:
   PKCS#1 and SPKI keys (decrypted with the private key), the `connect_wifi`
   body, mDNS replies with and without address records, and the subnet sweep.
 - `session_test`: runs every flow against the fakes:
+  - requires a successful HTTPS setup request independently of HTTP fallback;
   - moving on the home network to a network the phone is not on;
   - a wrong password that sends the device back to its old network;
   - setup through a hotspot that stays up;

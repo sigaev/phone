@@ -5,7 +5,6 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/rsa.h>
 #include <netinet/in.h>
-#include <psa/crypto.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -281,7 +280,6 @@ void test_discovery() {
 }
 
 int main() {
-  if (psa_crypto_init() != PSA_SUCCESS) return 1;
   test_json();
   test_info();
   test_scan();

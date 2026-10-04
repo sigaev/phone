@@ -9,6 +9,7 @@ exports_files([
     "android.bzl",
     "libcxx.BUILD.bazel",
     "libcxx.bzl",
+    "mbedtls.bzl",
     "no_unwind.ld",
     "stb.BUILD.bazel",
     "spirv.bzl",

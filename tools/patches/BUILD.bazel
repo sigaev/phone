@@ -1,1 +1,4 @@
-exports_files(["hermetic_android_arm64.patch"])
+exports_files([
+    "hermetic_android_arm64.patch",
+    "mbedtls_target_config.patch",
+])

@@ -12,7 +12,6 @@
 #include <mbedtls/x509_crt.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <psa/crypto.h>
 #include <pthread.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -410,8 +409,7 @@ common::Result<common::Owner<FakeDevice>> create_fake_device(const FakeDeviceCon
   mbedtls_x509_crt_init(&d->certificate);
   mbedtls_ssl_config_init(&d->tls);
   d->crypto = true;
-  if (psa_crypto_init() != PSA_SUCCESS || !make_keys(*d))
-    return failure("Cannot create the fake device's keys");
+  if (!make_keys(*d)) return failure("Cannot create the fake device's keys");
   d->setup_mode = config.setup_mode;
   if (!config.setup_mode && !config.networks.empty()) {
     d->ssid = config.networks[0].ssid;

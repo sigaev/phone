@@ -64,6 +64,10 @@ build --features=-static_link_cpp_runtimes
 build --linkopt=-nostdlib++
 build --linkopt=--unwindlib=none
 
+# Chromecast only needs a TLS 1.2 client. Its test rules select a configuration
+# that also enables the fake device's server and key/certificate generation.
+build --@mbedtls//:mbedtls_config=//chromecast:mbedtls_config
+
 # rules_android's build-time Java tools require Java 17.
 build --java_language_version=17
 build --java_runtime_version=remotejdk_17

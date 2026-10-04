@@ -1,5 +1,4 @@
 #include <poll.h>
-#include <psa/crypto.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -9,6 +8,7 @@
 #include <string>
 
 #include "chromecast/fakes.h"
+#include "chromecast/http.h"
 #include "chromecast/session.h"
 
 namespace {
@@ -70,6 +70,13 @@ World make_world(const FakeDeviceConfig& device, const std::vector<std::string>&
   if (!created) return w;
   w.device = std::move(*created);
   w.platform = create_fake_platform(*w.device, phone, behavior);
+  if (!device.setup_mode) {
+    // Setup flows can fall back to HTTP; require TLS to work independently so
+    // a broken crypto configuration cannot silently pass those tests.
+    auto response = request({0, device.lan, https_port(*w.device), true}, "GET", kInfoPath);
+    check(response && response->status == 200 && parse_info(response->body).has_value(),
+          "the fake device's setup API works over TLS without HTTP fallback");
+  }
   SessionConfig config;
   config.directory = directory;
   config.https_port = https_port(*w.device);
@@ -315,7 +322,6 @@ void test_save_confirmation(const std::string& directory, int status, int attemp
 }
 
 int main() {
-  if (psa_crypto_init() != PSA_SUCCESS) return 1;
   char directory[] = "/data/data/com.termux/files/usr/tmp/chromecast-session.XXXXXX";
   char fallback[] = "/tmp/chromecast-session.XXXXXX";
   const char* root = mkdtemp(directory);

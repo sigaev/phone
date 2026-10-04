@@ -5,7 +5,6 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/rsa.h>
-#include <psa/crypto.h>
 
 #include <algorithm>
 #include <new>
@@ -230,7 +229,6 @@ common::Result<std::string> encrypt_password(std::string_view public_key,
                             compact.size()) != 0)
     return failure("The Chromecast's public key is not valid base64");
   der.resize(size);
-  if (psa_crypto_init() != PSA_SUCCESS) return failure("Cannot initialize cryptography");
   common::Owner<Rsa> r(new (std::nothrow) Rsa);
   if (!r) return failure("Cannot allocate the encryption state");
   mbedtls_entropy_init(&r->entropy);
