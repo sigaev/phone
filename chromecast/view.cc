@@ -473,6 +473,9 @@ void draw_widget(const Painter& painter, const Widget& w, Hit pressed, double ti
   p.wallpaper_text = w.kind != Kind::kButton && w.kind != Kind::kPrimary && w.kind != Kind::kRow &&
                      w.kind != Kind::kKey && !(w.kind == Kind::kLink && down);
   switch (w.kind) {
+    case Kind::kFps:
+      p.text(w.label, b.x + b.w, center_y(b), p.px(9), kWhite, 1);
+      break;
     case Kind::kTitle:
       p.text(p.fit(w.label, b.w, p.px(17)), b.x, center_y(b), p.px(17), kInk);
       break;
@@ -619,6 +622,7 @@ Layout layout_view(int width, int height, Rect content, float density, const Vie
   float w = l.safe.w / s, h = l.safe.h / s;
   float column = std::max(1.f, std::min(w - 32, 560.f));
   Builder b{l, l.safe.x, l.safe.y, s, (w - column) * .5f, column, h};
+  b.add(Kind::kFps, w - 78, 0, 70, 14, std::to_string(std::lround(in.fps)) + " FPS");
   l.list = {};
   switch (in.screen) {
     case Screen::kDevices:

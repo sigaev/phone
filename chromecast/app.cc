@@ -49,6 +49,9 @@ struct App {
   std::vector<unsigned char> wallpaper;
   int wallpaper_width = 0, wallpaper_height = 0;
   int blink = -1;
+  float fps = 0;
+  double fps_since = 0, fps_last = 0;
+  unsigned fps_frames = 0;
 };
 
 namespace {
@@ -69,7 +72,24 @@ ViewInput view_input(const App& a) {
   in.keyboard = a.keyboard;
   in.scroll = a.scroll;
   in.has_wallpaper = !a.wallpaper.empty();
+  in.fps = a.fps;
   return in;
+}
+
+void record_frame(App& a, double now) {
+  if (!a.fps_last || now <= a.fps_last || now - a.fps_last > 1) {
+    a.fps = 0;
+    a.fps_since = now;
+    a.fps_frames = 0;
+  } else {
+    ++a.fps_frames;
+    if (double elapsed = now - a.fps_since; elapsed >= .5) {
+      a.fps = a.fps_frames / elapsed;
+      a.fps_since = now;
+      a.fps_frames = 0;
+    }
+  }
+  a.fps_last = now;
 }
 
 // Commands update the snapshot at once, so the next frame shows the new
@@ -389,6 +409,11 @@ void on_session(App& a) {
 }
 
 bool update(App& a, double now) {
+  // Show zero once rendering stops, without continuously redrawing an idle app.
+  if (a.fps > 0 && now - a.fps_last > 1) {
+    a.fps = 0;
+    a.dirty = true;
+  }
   if (a.repeat_at >= 0 && now >= a.repeat_at && a.pressed.target == Target::kKey &&
       a.pressed.index == kDeleteKey) {
     press_key(a, kDeleteKey, now);
@@ -428,6 +453,8 @@ Result<bool> draw(App& a, double now) {
   draw_view(r, layout, a.pressed, now);
   auto presented = gpu::present(r);
   if (presented && *presented) {
+    // Count completed submissions at their intended presentation times.
+    record_frame(a, now);
     a.layout = std::move(layout);
     a.laid_out = true;
     a.dirty = false;

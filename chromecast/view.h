@@ -45,6 +45,7 @@ struct Hit {
 };
 
 enum class Kind {
+  kFps,
   kTitle,
   kSubtitle,
   kText,
@@ -85,6 +86,7 @@ struct ViewInput {
   Keyboard keyboard;
   float scroll = 0;
   bool has_wallpaper = false;
+  float fps = 0;
 };
 
 struct Layout {

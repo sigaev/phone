@@ -14,7 +14,7 @@ firmware 1.36) on 2026-09-24. The interface and networking use C++; a small
 The window background is fully transparent, showing your system wallpaper without
 a tint. Only buttons, tappable rows, and keyboard keys have translucent fills;
 text has a small outline for readability. Tap **Choose image for ripples** and
-choose your wallpaper image to give it a very gentle moving-water reflection.
+choose your wallpaper image to give it broad, slowly moving water ripples.
 The image is centered and cropped to fill the window. Only the background bends;
 text and controls stay still. A private copy, resized to at most 2048 pixels on
 its longest edge, is remembered across launches without any storage permission.
@@ -26,6 +26,8 @@ Wallpaper motion follows the display's presentation timelines, using Native Butt
 peak-refresh-rate and adaptive whole-refresh frame pacing. It stops when the app
 is paused. Choosing a ripple image explicitly enables its continuous motion,
 independently of Android's UI animation duration scale.
+The top-right corner shows rendered FPS averaged over half a second; it returns
+to zero when rendering becomes idle.
 
 The first screen lists the Chromecasts on every Wi-Fi network the phone has,
 plus the ones the app has seen before:
