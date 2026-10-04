@@ -38,14 +38,16 @@ public final class ChromecastActivity extends NativeActivity {
 
   // Called from the native Wallpaper button. No storage permission is needed.
   public void chooseWallpaper() {
+    if (!wallpaperFile().exists()) {
+      pickWallpaper();
+      return;
+    }
     new AlertDialog.Builder(this)
         .setTitle("Wallpaper")
         .setItems(new String[] {"Choose image for ripples", "System wallpaper (still)"},
             (dialog, which) -> {
               if (which == 0) {
-                Intent pick = new Intent(MediaStore.ACTION_PICK_IMAGES);
-                pick.setType("image/*");
-                startActivityForResult(pick, PICK_WALLPAPER);
+                pickWallpaper();
               } else {
                 ++imageRequest;
                 images.execute(() -> new AtomicFile(wallpaperFile()).delete());
@@ -53,6 +55,12 @@ public final class ChromecastActivity extends NativeActivity {
               }
             })
         .show();
+  }
+
+  private void pickWallpaper() {
+    Intent pick = new Intent(MediaStore.ACTION_PICK_IMAGES);
+    pick.setType("image/*");
+    startActivityForResult(pick, PICK_WALLPAPER);
   }
 
   @Override

@@ -168,7 +168,7 @@ void call_void(JNIEnv* env, jobject object, const char* name, const char* signat
   if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
-// Dark system-bar icons over the light translucent veil, drawn edge to edge.
+// Light system-bar icons over the untinted wallpaper, drawn edge to edge.
 void style_system_bars(ANativeActivity* activity) {
   JNIEnv* env = activity->env;
   if (env->PushLocalFrame(8) != 0) {
@@ -179,7 +179,7 @@ void style_system_bars(ANativeActivity* activity) {
   jobject controller =
       call_object(env, window, "getInsetsController", "()Landroid/view/WindowInsetsController;");
   constexpr int kLightBars = 8 | 16;
-  call_void(env, controller, "setSystemBarsAppearance", "(II)V", kLightBars, kLightBars);
+  call_void(env, controller, "setSystemBarsAppearance", "(II)V", 0, kLightBars);
   env->PopLocalFrame(nullptr);
 }
 
@@ -783,16 +783,8 @@ void on_resume(ANativeActivity* activity) {
   a.resumed = true;
   a.next_slot = 0;
   reset_pacing(a);
-  JNIEnv* env = activity->env;
-  if (env->PushLocalFrame(4) == 0) {
-    jclass animator = env->FindClass("android/animation/ValueAnimator");
-    jmethodID enabled =
-        animator ? env->GetStaticMethodID(animator, "areAnimatorsEnabled", "()Z") : nullptr;
-    bool motion = enabled ? env->CallStaticBooleanMethod(animator, enabled) : true;
-    if (thrown(env)) motion = false;
-    set_wallpaper_motion(*a.app, motion);
-    env->PopLocalFrame(nullptr);
-  } else env->ExceptionClear();
+  // Choosing a ripple image explicitly enables the continuous effect, like
+  // Native Buttons' scene; Android's UI transition scale does not stop it.
   settle(a);
 }
 

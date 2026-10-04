@@ -26,8 +26,6 @@ constexpr Color kRed{.851f, .188f, .145f};
 constexpr Color kKey{.97f, .985f, 1, .68f};
 constexpr Color kKeySpecial{.78f, .85f, .94f, .72f};
 constexpr Color kKeyPressed{.66f, .76f, .88f, .88f};
-constexpr Color kSuccessPanel{.902f, .957f, .918f, .84f};
-constexpr Color kErrorPanel{.992f, .918f, .910f, .86f};
 
 constexpr float kListGap = 10, kBottomBar = 84;
 
@@ -113,7 +111,8 @@ void layout_devices(Builder& b, const ViewInput& in) {
         searching           ? "Looking on this phone's Wi-Fi..."
         : s.devices.empty() ? "No Chromecast found"
                             : "Choose a Chromecast to move to another network");
-  b.row(Kind::kLink, 84, 44, "Wallpaper", Target::kWallpaper);
+  b.row(Kind::kLink, 84, 44, in.has_wallpaper ? "Wallpaper" : "Choose image for ripples",
+        Target::kWallpaper);
   float y = b.list(140, in.scroll);
   for (std::size_t i = 0; i < s.devices.size(); ++i) {
     const Device& d = s.devices[i];
@@ -329,6 +328,7 @@ struct Painter {
   float s;
   // Capital height per unit of text height.
   float cap;
+  bool wallpaper_text = false;
 
   float px(float dp) const { return dp * s; }
 
@@ -341,6 +341,16 @@ struct Painter {
             int align = -1) const {
     float height = cap_height / cap, baseline = cy + cap_height * .5f;
     if (align > 0) x -= width(value, cap_height);
+    if (wallpaper_text) {
+      // A small outline follows only the glyphs, keeping the wallpaper clear.
+      float edge = px(.65f);
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+          if (dx || dy)
+            gpu::draw_text(r, value.c_str(), x + dx * edge, baseline + dy * edge, height,
+                           {0, 0, 0, .7f}, align == 0);
+      color = kWhite;
+    }
     gpu::draw_text(r, value.c_str(), x, baseline, height, color, align == 0);
   }
 
@@ -456,9 +466,12 @@ struct Painter {
 
 bool is(Hit a, const Widget& w) { return a.target == w.target && a.index == w.index; }
 
-void draw_widget(const Painter& p, const Widget& w, Hit pressed, double time) {
+void draw_widget(const Painter& painter, const Widget& w, Hit pressed, double time) {
+  Painter p = painter;
   Rect b = w.bounds;
   bool down = w.target != Target::kNone && w.enabled && is(pressed, w);
+  p.wallpaper_text = w.kind != Kind::kButton && w.kind != Kind::kPrimary && w.kind != Kind::kRow &&
+                     w.kind != Kind::kKey && !(w.kind == Kind::kLink && down);
   switch (w.kind) {
     case Kind::kTitle:
       p.text(p.fit(w.label, b.w, p.px(17)), b.x, center_y(b), p.px(17), kInk);
@@ -472,7 +485,6 @@ void draw_widget(const Painter& p, const Widget& w, Hit pressed, double time) {
     case Kind::kError:
     case Kind::kSuccess: {
       bool good = w.kind == Kind::kSuccess;
-      gpu::draw_rect(p.r, b, p.px(14), good ? kSuccessPanel : kErrorPanel);
       float icon = p.px(22), cx = b.x + p.px(28), cy = b.y + p.px(28);
       p.dot(cx, cy, icon * .5f, good ? kGreen : kRed);
       if (good) p.check(cx, cy, icon * .9f, kWhite);
@@ -486,6 +498,7 @@ void draw_widget(const Painter& p, const Widget& w, Hit pressed, double time) {
       bool primary = w.kind == Kind::kPrimary;
       Color fill = primary ? (w.enabled ? (down ? kBluePressed : kBlue) : kLine)
                            : (down ? kCardPressed : kCard);
+      if (primary && w.enabled) fill.a = down ? .9f : .8f;
       gpu::draw_rect(p.r, b, b.h * .5f, fill);
       Color ink = primary ? kWhite : w.enabled ? kLinkInk : kFaint;
       p.text(p.fit(w.label, b.w - p.px(16), p.px(12)), center_x(b), center_y(b), p.px(12), ink, 0);
@@ -493,7 +506,8 @@ void draw_widget(const Painter& p, const Widget& w, Hit pressed, double time) {
     }
     case Kind::kLink:
       if (down) gpu::draw_rect(p.r, b, std::min(b.w, b.h) * .5f, kCard);
-      if (w.target == Target::kBack) p.chevron(center_x(b), center_y(b), p.px(26), kInk);
+      if (w.target == Target::kBack)
+        p.chevron(center_x(b), center_y(b), p.px(26), down ? kInk : kWhite);
       else p.text(w.label, center_x(b), center_y(b), p.px(12), kLinkInk, 0);
       break;
     case Kind::kRow: {
@@ -532,14 +546,12 @@ void draw_widget(const Painter& p, const Widget& w, Hit pressed, double time) {
       break;
     }
     case Kind::kField: {
-      gpu::draw_rect(p.r, b, p.px(12), kBlue);
-      Rect inner{b.x + p.px(2), b.y + p.px(2), b.w - p.px(4), b.h - p.px(4)};
-      gpu::draw_rect(p.r, inner, p.px(10), kWhite);
+      p.line(b.x, b.y + b.h, b.x + b.w, b.y + b.h, p.px(2), kWhite);
       float left = b.x + p.px(16), limit = b.w - p.px(36), cy = center_y(b), end = left;
       if (w.locked) {
         float step = p.px(13);
         std::size_t count = std::min(w.label.size(), std::size_t(std::max(0.f, limit / step)));
-        for (std::size_t i = 0; i < count; ++i) p.dot(left + step * (i + .5f), cy, p.px(4), kInk);
+        for (std::size_t i = 0; i < count; ++i) p.dot(left + step * (i + .5f), cy, p.px(4), kWhite);
         end = left + step * count;
       } else {
         std::string shown = w.label;
@@ -548,7 +560,7 @@ void draw_widget(const Painter& p, const Widget& w, Hit pressed, double time) {
         end = left + p.width(shown, p.px(14));
       }
       if (std::fmod(time, 1.) < .6)
-        gpu::draw_rect(p.r, {end + p.px(2), cy - p.px(12), p.px(2), p.px(24)}, 0, kBlue);
+        gpu::draw_rect(p.r, {end + p.px(2), cy - p.px(12), p.px(2), p.px(24)}, 0, kWhite);
       break;
     }
     case Kind::kSpinner:

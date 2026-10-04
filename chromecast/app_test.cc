@@ -270,31 +270,45 @@ void test_overlay() {
   auto image = wallpaper_pixels(256, 384);
   check(bool(gpu::set_overlay_image(r, 256, 384, image)), "the wallpaper uploads");
   check(!gpu::set_overlay_image(r, 1, 1, image), "invalid uploads preserve the existing wallpaper");
-  check(begin({.96f, .98f, 1, .56f}, 0), "the water background draws");
+  check(begin({0, 0, 0, 0}, 0), "the water background draws");
   auto first = pixels();
-  check(begin({.96f, .98f, 1, .56f}, 1. / 120), "the next display frame draws");
+  check(begin({0, 0, 0, 0}, 1. / 120), "the next display frame draws");
   auto next = pixels();
-  check(begin({.96f, .98f, 1, .56f}, 10), "the later water background draws");
+  check(begin({0, 0, 0, 0}, 2), "the later water background draws");
   auto later = pixels();
   unsigned changed = 0;
+  unsigned difference = 0;
   int maximum_step = 0;
   for (std::size_t i = 0; i < first.size(); ++i) {
     maximum_step = std::max(maximum_step, std::abs(int(first[i]) - int(next[i])));
     changed += first[i] != later[i];
+    difference += std::abs(int(first[i]) - int(later[i]));
     if (i % 4 == 3) check(first[i] == 255, "the selected image fills every background pixel");
   }
   check(changed > kWidth * kHeight / 10, "the ripples refract the selected image over time");
+  check(double(difference) / (kWidth * kHeight * 3) > .4,
+        "refraction is visible within two seconds without relying on a tint animation");
   check(maximum_step <= 2, "the water moves gently between adjacent display frames");
-  check(begin({.96f, .98f, 1, .56f}, 200 * double(gpu::kPi)), "the wrapped water clock draws");
+  check(begin({0, 0, 0, 0}, 200 * double(gpu::kPi)), "the wrapped water clock draws");
   auto wrapped = pixels();
   int wrap_difference = 0;
   for (std::size_t i = 0; i < first.size(); ++i)
     wrap_difference = std::max(wrap_difference, std::abs(int(first[i]) - int(wrapped[i])));
   check(wrap_difference <= 1, "the water clock loops without a visible jump");
+  const unsigned char uniform[] = {40, 80, 120, 128};
+  for (std::size_t i = 0; i < image.size(); ++i) image[i] = uniform[i % 4];
+  check(bool(gpu::set_overlay_image(r, 256, 384, image)), "a transparent image uploads");
+  check(begin({0, 0, 0, 0}, 2), "the transparent image draws without a veil");
+  auto untinted = pixels();
+  bool unchanged = true;
+  for (std::size_t i = 0; i < untinted.size(); ++i)
+    unchanged &= std::abs(int(untinted[i]) - int(uniform[i % 4])) <= 1;
+  check(unchanged, "refraction preserves image colors and transparency without adding a base");
   check(bool(gpu::set_overlay_image(r, 0, 0, {})), "the custom wallpaper can be removed");
-  check(begin({1, 1, 1, .5f}), "the system wallpaper fallback draws");
+  check(begin({0, 0, 0, 0}), "the system wallpaper fallback draws");
   auto fallback = pixels();
-  check(std::abs(int(fallback[3]) - 128) <= 1, "removing the image restores window transparency");
+  check(std::all_of(fallback.begin(), fallback.end(), [](unsigned char p) { return p == 0; }),
+        "the system wallpaper has a completely transparent background");
 }
 
 void capture(App& app, const char* name) {
@@ -429,14 +443,28 @@ void test_move(const std::string& directory) {
             !take_wallpaper_request(a),
         "the Wallpaper control requests the picker once");
   check(update(a, monotonic()), "the wallpaper keeps visible frames animating");
-  set_wallpaper_motion(a, false);
+  check(bool(set_wallpaper(a, 0, 0, {})), "the app returns to the system wallpaper");
   check(render(a) && !update(a, monotonic()),
-        "disabled system animations leave a static background");
+        "the system wallpaper does not request continuous rendering");
+  check(find_widget(a, Target::kWallpaper)->label == "Choose image for ripples",
+        "the still wallpaper shows how to enable ripples");
+  auto stats = gpu::get_stats(*get_renderer(a));
+  std::vector<unsigned char> clear(std::size_t(stats.width) * stats.height * 4);
+  check(bool(gpu::read_pixels(*get_renderer(a), clear)), "the clear app frame can be read");
+  check(clear[3] == 0 && clear[clear.size() - 1] == 0 &&
+            clear[(stats.height / 2 * stats.width + 8) * 4 + 3] == 0,
+        "the app adds no fill behind or around its controls");
+  const Widget* button = find_widget(a, Target::kHotspot);
+  int bx = int(button->bounds.x + 12 * get_layout(a).scale), by = int(center_y(button->bounds));
+  unsigned alpha = clear[(by * stats.width + bx) * 4 + 3];
+  check(alpha > 0 && alpha < 255, "buttons remain translucent over the clear background");
+  check(bool(set_wallpaper(a, 512, 1024, wallpaper_pixels(512, 1024))) && render(a) &&
+            update(a, monotonic()),
+        "choosing an image enables continuous ripples");
   detach_window(a);
   check(!update(a, monotonic()), "a detached window does not request animation frames");
   check(bool(attach_window(a, nullptr, 1344, 2992)) && render(a),
         "the selected wallpaper survives surface recreation");
-  set_wallpaper_motion(a, true);
   check(tap(a, find_widget(a, Target::kDevice, 0)), "the device opens");
   check(pump(a, [&] { return network_row(a, "Upstairs") != nullptr; }), "its networks are listed");
   capture(a, "networks");

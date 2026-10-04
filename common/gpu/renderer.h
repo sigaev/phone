@@ -61,7 +61,7 @@ common::Result<bool> prepare_frame(Renderer& renderer, bool maximum);
 common::Result<bool> render(Renderer& renderer, Vec3 eye, Vec3 target, double time, bool maximum);
 // Begin an overlay renderer's frame cleared to background, after
 // prepare_frame(renderer, false). Draw its contents, then present().
-// With an image, background is its translucent tint; time drives the water motion.
+// With an image, its pixels replace the clear color; time drives the water motion.
 common::Result<bool> render_overlay(Renderer& renderer, Color background, double time = 0);
 // Supply tightly packed RGBA pixels for the gently refracted overlay background.
 // Empty pixels remove it. Upload only between frames; this waits for earlier GPU work.

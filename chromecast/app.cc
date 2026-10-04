@@ -13,7 +13,7 @@ using common::Owner;
 using common::Result;
 
 namespace {
-constexpr gpu::Color kBackground{.96f, .98f, 1, .56f};
+constexpr gpu::Color kBackground{0, 0, 0, 0};
 // Shift tapped twice within this time locks capitals.
 constexpr double kDoubleTap = .35;
 // Holding delete repeats it after a delay.
@@ -45,7 +45,7 @@ struct App {
   float down_x = 0, down_y = 0, scroll_start = 0;
   double repeat_at = -1;
   bool paste_requested = false;
-  bool wallpaper_requested = false, wallpaper_motion = true;
+  bool wallpaper_requested = false;
   std::vector<unsigned char> wallpaper;
   int wallpaper_width = 0, wallpaper_height = 0;
   int blink = -1;
@@ -68,6 +68,7 @@ ViewInput view_input(const App& a) {
   in.reveal = a.reveal;
   in.keyboard = a.keyboard;
   in.scroll = a.scroll;
+  in.has_wallpaper = !a.wallpaper.empty();
   return in;
 }
 
@@ -360,11 +361,6 @@ Result<void> set_wallpaper(App& a, int width, int height, std::vector<unsigned c
   return {};
 }
 
-void set_wallpaper_motion(App& a, bool enabled) {
-  a.wallpaper_motion = enabled;
-  a.dirty = true;
-}
-
 void paste(App& a, const std::string& text) {
   if (screen(a) != Screen::kPassword) return;
   // Passwords copied from elsewhere often carry a trailing newline.
@@ -399,7 +395,7 @@ bool update(App& a, double now) {
     a.repeat_at = now + kRepeatInterval;
     a.dirty = true;
   }
-  bool animating = a.wallpaper_motion && !a.wallpaper.empty();
+  bool animating = !a.wallpaper.empty();
   for (const Widget& w : a.layout.widgets)
     if (w.kind == Kind::kSpinner || (w.kind == Kind::kStep && w.status == 1)) animating = true;
   if (screen(a) == Screen::kPassword) {
@@ -427,7 +423,7 @@ Result<bool> draw(App& a, double now) {
     in.scroll = limit;
     layout = layout_view(stats.width, stats.height, a.content, a.density, in);
   }
-  auto begun = gpu::render_overlay(r, kBackground, a.wallpaper_motion ? now : 0);
+  auto begun = gpu::render_overlay(r, kBackground, now);
   if (!begun || !*begun) return begun;
   draw_view(r, layout, a.pressed, now);
   auto presented = gpu::present(r);

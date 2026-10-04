@@ -11,19 +11,21 @@ firmware 1.36) on 2026-09-24. The interface and networking use C++; a small
 
 ## Using it
 
-The window shows your system wallpaper through a light translucent veil, with
-glass-like cards and buttons. Tap **Wallpaper → Choose image for ripples** and
+The window background is fully transparent, showing your system wallpaper without
+a tint. Only buttons, tappable rows, and keyboard keys have translucent fills;
+text has a small outline for readability. Tap **Choose image for ripples** and
 choose your wallpaper image to give it a very gentle moving-water reflection.
 The image is centered and cropped to fill the window. Only the background bends;
 text and controls stay still. A private copy, resized to at most 2048 pixels on
 its longest edge, is remembered across launches without any storage permission.
-**System wallpaper (still)** removes that copy and restores the live system
-wallpaper behind the translucent window. Android does not allow this app to read
+**Wallpaper → System wallpaper (still)** removes that copy and restores the live system
+wallpaper behind the transparent window. Android does not allow this app to read
 the system wallpaper's pixels directly for distortion.
 
 Wallpaper motion follows the display's presentation timelines, using Native Buttons'
 peak-refresh-rate and adaptive whole-refresh frame pacing. It stops when the app
-is paused and respects Android's disabled-animation setting.
+is paused. Choosing a ripple image explicitly enables its continuous motion,
+independently of Android's UI animation duration scale.
 
 The first screen lists the Chromecasts on every Wi-Fi network the phone has,
 plus the ones the app has seen before:
@@ -195,8 +197,8 @@ The tests cover the following:
     and update or setup requirements after Wi-Fi is saved.
 - `app_test`: checks the layouts of every screen at five window sizes for
   overlap, safe areas, and hit targets. GPU checks cover premultiplied transparency,
-  scroll clipping, wallpaper upload/removal, gentle animation and clock wrapping,
-  disabled motion, and preserving the image across surface recreation.
+  scroll clipping, untinted image colors, wallpaper upload/removal, visible gentle
+  animation and clock wrapping, and preserving the image across surface recreation.
   It then taps through the real app on the
   GPU with offscreen rendering, typing passwords with symbols on the on-screen
   keyboard. Pass a directory to save PPM screenshots:

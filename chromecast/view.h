@@ -84,6 +84,7 @@ struct ViewInput {
   bool reveal = false;
   Keyboard keyboard;
   float scroll = 0;
+  bool has_wallpaper = false;
 };
 
 struct Layout {

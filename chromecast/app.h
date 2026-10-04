@@ -45,7 +45,6 @@ void paste(App& app, const std::string& text);
 bool take_wallpaper_request(App& app);
 common::Result<void> set_wallpaper(App& app, int width, int height,
                                    std::vector<unsigned char> rgba);
-void set_wallpaper_motion(App& app, bool enabled);
 // Readable when the session has news; then call on_session().
 int app_fd(const App& app);
 void on_session(App& app);

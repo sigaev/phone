@@ -1587,7 +1587,6 @@ Result<bool> render_overlay(Renderer& r, Color background, double time) {
   if (r.wallpaper) {
     constants.size.r = float(r.wallpaper->extent.width);
     constants.size.g = float(r.wallpaper->extent.height);
-    constants.parameters = background;
     constants.eye_time.a = oscillation_time(time);
   }
   if (auto result = begin_commands(r, frame); !result) return std::unexpected(result.error());
