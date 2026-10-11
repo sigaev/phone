@@ -124,7 +124,7 @@ Result<void> check_runtime(const char* path) {
     CHECK(next.frames > paused.frames && next.time == paused.time,
           "Paused redraw must draw without advancing animation");
 
-    for (Bird bird : {Bird::kPelican, Bird::kFlamingo}) {
+    for (Bird bird : {Bird::kPelican, Bird::kEagle, Bird::kFlamingo}) {
       auto selector = layout_controls(get_state(r).safe).bird;
       touch(r, Touch::kDown, selector.x + selector.w * .5f, selector.y + selector.h * .5f);
       touch(r, Touch::kUp, selector.x + selector.w * .5f, selector.y + selector.h * .5f);
@@ -187,7 +187,7 @@ Result<void> check_runtime(const char* path) {
   CHECK(loaded && *loaded == 0, "Worker shutdown lost the saved state");
   // Destroy with a queued Choreographer callback to exercise callback lifetime.
   {
-    SessionState original{12, true, true, -1.2f, 127.5f, 1.75f, Bird::kPelican};
+    SessionState original{12, true, true, -1.2f, 127.5f, 1.75f, Bird::kEagle};
     auto restored = decode_state(encode_state(original));
     CHECK(restored, "Cannot decode saved Activity state");
     auto runtime = create_runtime(path, *restored);

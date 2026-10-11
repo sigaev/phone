@@ -92,24 +92,26 @@ int main() {
   }
   // Changing birds reuses prebuilt meshes and updates every species label.
   auto mesh_count = renderer.next_mesh;
-  gpu::MeshId previous_neck = 0;
+  std::vector<gpu::MeshId> previous_meshes;
+  const char* names[] = {"Pelican", "Flamingo", "Eagle"};
+  const char* captions[] = {"A pelican. A bicycle. No hurry.", "A flamingo. A bicycle. No hurry.",
+                            "A bald eagle. A bicycle. No hurry."};
   for (auto bird : {native_buttons::Bird::kPelican, native_buttons::Bird::kFlamingo,
-                    native_buttons::Bird::kPelican}) {
+                    native_buttons::Bird::kEagle, native_buttons::Bird::kPelican}) {
     auto rendered = native_buttons::render_scene(**scene, 3.28, .34f, false, 0, 0, 60, true, {},
                                                  true, true, 1, 1, bird);
-    bool flamingo = bird == native_buttons::Bird::kFlamingo;
-    const char* name = flamingo ? "Flamingo" : "Pelican";
-    const char* caption =
-        flamingo ? "A flamingo. A bicycle. No hurry." : "A pelican. A bicycle. No hurry.";
-    const char* other = flamingo ? "Pelican" : "Flamingo";
     if (!rendered || !*rendered || renderer.next_mesh != mesh_count || renderer.meshes.empty() ||
-        renderer.meshes.front() == previous_neck ||
-        std::find(renderer.labels.begin(), renderer.labels.end(), name) == renderer.labels.end() ||
-        std::find(renderer.labels.begin(), renderer.labels.end(), caption) ==
-            renderer.labels.end() ||
-        std::find(renderer.labels.begin(), renderer.labels.end(), other) != renderer.labels.end())
+        renderer.meshes == previous_meshes)
       return 14;
-    previous_neck = renderer.meshes.front();
+    auto shown = [&](const char* label) {
+      return std::find(renderer.labels.begin(), renderer.labels.end(), label) !=
+             renderer.labels.end();
+    };
+    for (int i = 0; i < 3; ++i) {
+      bool selected = i == static_cast<int>(bird);
+      if (shown(names[i]) != selected || shown(captions[i]) != selected) return 14;
+    }
+    previous_meshes = renderer.meshes;
   }
   // A single frame must still move scenery and camera after days or a year,
   // including frames spanning either periodic clock's wrap boundary.

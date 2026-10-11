@@ -70,9 +70,10 @@ common::Result<void> exercise_renderer() {
     if (after.render_width != before.render_width || after.render_height != before.render_height)
       return std::unexpected(common::Error{"Deferred rendering changed target dimensions"});
     std::vector<unsigned char> pixels(size_t(width) * height * 4);
-    for (int i = 0; i < 12; ++i) {
-      bool maximum = i >= 4 && i < 8;
-      Bird bird = i % 4 < 2 ? Bird::kPelican : Bird::kFlamingo;
+    // Each bird renders in High, then Ultra, then High again.
+    for (int i = 0; i < 18; ++i) {
+      bool maximum = i >= 6 && i < 12;
+      Bird bird = static_cast<Bird>(i / 2 % 3);
       auto rendered = require_frame(native_buttons::render_scene(
           **scene, 2.f + i * .25f, .34f, maximum, 7, 0, 60, false,
           {0, 0, float(width), float(height)}, true, true, 1, 1, bird));
@@ -91,9 +92,9 @@ common::Result<void> exercise_renderer() {
         if (brightest - darkest < 100)
           return std::unexpected(common::Error{"Rendered scene is blank"});
         auto stats = gpu::get_stats(**renderer);
+        constexpr unsigned kTriangles[][2] = {{747078, 869830}, {739398, 862150}, {598078, 720830}};
         if (stats.samples != 4 || stats.particles != (maximum ? 65536 : 16384) ||
-            stats.triangles != (bird == Bird::kPelican ? (maximum ? 869830u : 747078u)
-                                                       : (maximum ? 862150u : 739398u)))
+            stats.triangles != kTriangles[static_cast<int>(bird)][maximum])
           return std::unexpected(common::Error{"Scene workload changed unexpectedly"});
       }
     }
@@ -121,6 +122,12 @@ common::Result<void> exercise_renderer() {
       auto pelican = pixels;
       if (auto result = capture(120.5f, 1, Bird::kPelican); !result) return result;
       if (pixels == pelican) return std::unexpected(common::Error{"Pelican animation is frozen"});
+      if (auto result = capture(120.f, 1, Bird::kEagle); !result) return result;
+      if (pixels == reference || pixels == pelican)
+        return std::unexpected(common::Error{"Eagle selection did not change the scene"});
+      auto eagle = pixels;
+      if (auto result = capture(120.5f, 1, Bird::kEagle); !result) return result;
+      if (pixels == eagle) return std::unexpected(common::Error{"Eagle animation is frozen"});
       if (auto result = capture(120.f); !result) return result;
       if (pixels != reference)
         return std::unexpected(common::Error{"Switching birds changed the frozen scene"});
@@ -227,9 +234,11 @@ common::Result<void> run_probe(int argc, char** argv) {
   double start_time = argc > 5 ? std::strtod(argv[5], nullptr) : 2.;
   float density = argc > 6 ? std::strtof(argv[6], nullptr) : std::min(width, height) / 360.f;
   float zoom = argc > 7 ? std::strtof(argv[7], nullptr) : 1;
-  if (argc > 8 && std::strcmp(argv[8], "pelican") != 0 && std::strcmp(argv[8], "flamingo") != 0)
-    return std::unexpected(common::Error{"Bird must be pelican or flamingo"});
-  Bird bird = argc > 8 && std::strcmp(argv[8], "pelican") == 0 ? Bird::kPelican : Bird::kFlamingo;
+  Bird bird = Bird::kFlamingo;
+  if (argc > 8 && std::strcmp(argv[8], "pelican") == 0) bird = Bird::kPelican;
+  else if (argc > 8 && std::strcmp(argv[8], "eagle") == 0) bird = Bird::kEagle;
+  else if (argc > 8 && std::strcmp(argv[8], "flamingo") != 0)
+    return std::unexpected(common::Error{"Bird must be pelican, flamingo, or eagle"});
   if (width < 1 || height < 1 || width > 4096 || height > 4096)
     return std::unexpected(common::Error{"Invalid image dimensions"});
   if (!std::isfinite(start_time) || start_time < 0)

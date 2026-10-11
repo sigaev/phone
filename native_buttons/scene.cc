@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 #include <new>
+#include <span>
 #include <vector>
 
 #include "common/gpu/renderer.h"
@@ -17,7 +19,7 @@ using common::Result;
 
 struct Scene {
   Renderer* renderer;
-  MeshId pelican_neck, flamingo_neck, scarf;
+  MeshId pelican_neck, flamingo_neck, eagle_neck, scarf, lettering;
   Controls controls;
 };
 
@@ -27,6 +29,11 @@ constexpr Color kFeather{.57f, .66f, .69f}, kOrange{1.f, .46f, .09f}, kPouch{1.f
 constexpr Color kPink{1.f, .25f, .46f}, kBlush{1.f, .48f, .62f}, kRose{.86f, .075f, .27f};
 constexpr Color kLegs{.92f, .23f, .33f}, kMint{.10f, .74f, .56f}, kTeal{.03f, .53f, .43f};
 constexpr Color kChrome{.73f, .81f, .83f}, kCoral{.94f, .18f, .13f};
+constexpr Color kSnow{.96f, .95f, .91f}, kBrown{.20f, .11f, .05f}, kUmber{.11f, .06f, .03f};
+constexpr Color kGold{1.f, .60f, .04f}, kShirt{.95f, .96f, .95f}, kKelly{.02f, .46f, .16f};
+// The eagle's shirt torso. Its lettering mesh is projected onto this ellipsoid.
+constexpr Vec3 kShirtCenter{-.36f, 2.f, 0}, kShirtSize{.58f, .60f, .48f};
+constexpr float kShirtRoll = -.14f;
 constexpr Vec3 kCrank{-.10f, .75f, 0};
 constexpr float kPedalSpeed = 3.1f;
 constexpr float kOrbitSpeed = 2 * kPi / 60.f;
@@ -332,6 +339,105 @@ void flamingo(Scene& scene, float time, float blink_phase) {
            kPink);
   }
 }
+
+void eagle(Scene& scene, float time, float blink_phase) {
+  Renderer& r = *scene.renderer;
+  float bob = std::sin(time * 6.2f) * .025f;
+  float breath = 1.f + .012f * std::sin(time * 2.2f);
+  float flex = .065f * std::sin(time * 1.4f);
+  float sway = .035f * std::sin(time * .9f);
+  // A white ringer T-shirt with green trim and HARKER printed across the chest.
+  Vec3 chest = kShirtCenter + Vec3{0, bob, 0};
+  ball(r, chest, {kShirtSize.x, kShirtSize.y * breath, kShirtSize.z * breath}, kShirt, kShirtRoll,
+       .85f);
+  ball(r, {-.50f, 2.14f + bob, 0}, {.46f, .40f, .45f}, kShirt, -.20f, .85f);
+  add(r, scene.lettering, translation(chest) * rotate_z(kShirtRoll) * scale({1, breath, breath}),
+      kKelly, .7f);
+  add(r, Shape::kCylinder,
+      translation({-.14f, 2.53f + bob, 0}) * rotate_z(kShirtRoll) * scale({.23f, .05f, .21f}),
+      kKelly, .7f);
+  // Feathered brown hips below the hem and a fanned white tail.
+  ball(r, {-.40f, 1.56f + bob, 0}, {.48f, .24f, .41f}, kBrown, -.10f, .8f);
+  for (int i = -2; i <= 2; ++i)
+    leaf(r, {-.80f, 1.70f + bob, i * .045f}, {-1.36f, 1.60f + bob + .02f * std::abs(i), i * .12f},
+         .085f, kSnow);
+  for (int side : {-1, 1}) {
+    Vec3 shoulder{-.10f, 2.16f + bob, side * .42f},
+        elbow{.32f, 1.90f + bob, side * (.48f + .035f * std::sin(time * 3.1f))},
+        tip{.84f, 1.74f, side * .35f};
+    Vec3 arm = elbow - shoulder;
+    add(r, Shape::kSphere, between(shoulder, elbow, .105f) * scale({1, .65f, .7f}), kBrown, .7f, 0,
+        0, 3);
+    add(r, Shape::kSphere, between(elbow, tip, .095f) * scale({1, .65f, .65f}), kBrown, .7f, 0, 0,
+        3);
+    // Short sleeves with green cuffs; the brown wings emerge to grip the handlebar.
+    add(r, Shape::kCylinder, between(shoulder - arm * .15f, shoulder + arm * .42f, .16f), kShirt,
+        .85f, 0, 0, 3);
+    add(r, Shape::kCylinder, between(shoulder + arm * .40f, shoulder + arm * .48f, .168f), kKelly,
+        .7f);
+    for (int i = 0; i < 4; ++i)
+      ball(r, {.80f + i * .03f, 1.75f - i * .01f, side * (.30f + i * .03f)}, {.09f, .03f, .035f},
+           kUmber, -.20f);
+    // Overlapping dark coverts along each forearm read as folded wing feathers.
+    for (int i = 0; i < 3; ++i) {
+      Vec3 covert = elbow + (tip - elbow) * (.12f + i * .26f) + Vec3{-.03f, -.055f, side * .012f};
+      ball(r, covert, {.15f, .036f, .045f}, i % 2 ? kBrown : kUmber, -.32f, .75f);
+    }
+  }
+
+  add(r, scene.eagle_neck, translation({0, bob, 0}), kSnow, .7f, 0, 0, 7);
+  // A broad white head with a deep hooked beak, golden eyes and a stern brow.
+  set_transform(
+      r, translation({.24f + flex, 2.80f + bob, sway}) * rotate_z(.03f * std::sin(time * .8f)));
+  ball(r, {0, 0, 0}, {.30f, .25f, .25f}, kSnow, 0, .7f);
+  ball(r, {.06f, -.10f, 0}, {.23f, .14f, .22f}, kSnow, 0, .75f);
+  for (int i = 0; i < 3; ++i)
+    ball(r, {-.23f - i * .03f, .02f - i * .07f, 0}, {.12f, .07f, .17f - i * .02f}, kSnow, .5f, .8f);
+  // The upper mandible arches forward and tapers into a pointed hook.
+  ball(r, {.24f, 0, 0}, {.10f, .085f, .095f}, kGold, 0, .4f);
+  ball(r, {.34f, -.005f, 0}, {.12f, .075f, .075f}, kGold, -.15f, .35f);
+  ball(r, {.44f, -.03f, 0}, {.08f, .065f, .06f}, kGold, -.50f, .35f);
+  add(r, Shape::kCone, between({.48f, -.05f, 0}, {.51f, -.16f, 0}, .048f), kGold, .35f);
+  ball(r, {.35f, -.10f, 0}, {.11f, .03f, .06f}, {.92f, .48f, .03f}, -.10f, .45f);
+  float open = eye_openness(blink_phase);
+  for (int side : {-1, 1}) {
+    tube(r, {.20f, -.07f, side * .085f}, {.42f, -.11f, side * .045f}, .006f, {.40f, .18f, .02f});
+    ball(r, {.27f, .03f, side * .075f}, {.02f, .012f, .008f}, {.35f, .16f, .02f});
+    Vec3 eye{.18f, .05f, side * .19f};
+    add(r, Shape::kSphere, transform(eye, {.066f, .07f * open, .03f}), {1.f, .86f, .30f}, .22f);
+    Vec3 pupil = eye + Vec3{.012f + .008f * std::sin(time * .73f), 0, side * .022f};
+    add(r, Shape::kSphere, transform(pupil, {.035f, .042f * open, .015f}), kInk, .12f);
+    ball(r, pupil + Vec3{-.010f, .018f * open, side * .013f}, {.013f, .015f * open, .007f},
+         {1.f, .98f, .95f});
+    ball(r, {.17f, .145f, side * .18f}, {.11f, .028f, .055f}, kSnow, -.30f, .75f);
+  }
+  set_transform(r, Mat4{});
+
+  for (int side : {-1, 1}) {
+    Vec3 foot = pedal_position(time, side) + Vec3{0, .05f, 0};
+    Vec3 hip{-.33f, 1.62f + bob, side * .22f};
+    Vec3 d = foot - hip, mid = (foot + hip) * .5f;
+    float distance = length(d),
+          bend = std::sqrt(std::max(0.f, .60f * .60f - distance * distance * .25f));
+    Vec3 knee = mid + unit(Vec3{-d.y, d.x, 0}) * bend;
+    // Feathered trousers end above bare golden feet with black talons.
+    Vec3 ankle = knee + (foot - knee) * .45f;
+    add(r, Shape::kCylinder, between(hip, knee, .075f), kBrown, .8f, 0, 0, 3);
+    ball(r, knee, {.095f, .09f, .085f}, kBrown, 0, .8f);
+    add(r, Shape::kCylinder, between(knee, ankle, .062f), kBrown, .8f, 0, 0, 3);
+    ball(r, ankle, {.07f, .05f, .07f}, kBrown, 0, .85f);
+    tube(r, ankle, foot, .032f, kGold);
+    ball(r, foot + Vec3{.06f, 0, 0}, {.11f, .045f, .085f}, kGold, .03f);
+    for (int i = -1; i <= 1; ++i) {
+      Vec3 toe = foot + Vec3{.21f, -.006f, i * .065f};
+      tube(r, foot + Vec3{.02f, .01f, i * .025f}, toe, .021f, kGold);
+      add(r, Shape::kCone, between(toe, toe + Vec3{.05f, -.035f, i * .01f}, .016f), kInk, .3f);
+    }
+    Vec3 hallux = foot + Vec3{-.13f, -.004f, 0};
+    tube(r, foot, hallux, .021f, kGold);
+    add(r, Shape::kCone, between(hallux, hallux + Vec3{-.045f, -.035f, 0}, .016f), kInk, .3f);
+  }
+}
 }
 
 void build_scene(Scene& scene, double time, bool maximum, Bird bird) {
@@ -372,8 +478,10 @@ void build_scene(Scene& scene, double time, bool maximum, Bird bird) {
            {.64f, .78f, .80f});
   }
   bicycle(r, motion);
-  if (bird == Bird::kFlamingo) flamingo(scene, motion, static_cast<float>(wrap(time + 1.7, 4.8)));
-  else pelican(scene, motion, static_cast<float>(wrap(time + 1.7, 4.8)));
+  float blink_phase = static_cast<float>(wrap(time + 1.7, 4.8));
+  if (bird == Bird::kFlamingo) flamingo(scene, motion, blink_phase);
+  else if (bird == Bird::kEagle) eagle(scene, motion, blink_phase);
+  else pelican(scene, motion, blink_phase);
 }
 
 Vec3 camera(double time, float yaw, float aspect, float zoom, float target_height) {
@@ -395,8 +503,11 @@ Controls draw_overlay(Renderer& r, Rect safe, int count, int pressed, float fps,
   bool compact = layout.mode == OverlayMode::kCompact;
   bool landscape = layout.mode == OverlayMode::kLandscape;
   Color text{.92f, .96f, .97f}, muted{.74f, .84f, .87f}, mint{.49f, .94f, .76f};
-  const char* caption = bird == Bird::kFlamingo ? "A flamingo. A bicycle. No hurry."
-                                                : "A pelican. A bicycle. No hurry.";
+  constexpr const char* kNames[] = {"Pelican", "Flamingo", "Eagle"};
+  constexpr const char* kCaptions[] = {"A pelican. A bicycle. No hurry.",
+                                       "A flamingo. A bicycle. No hurry.",
+                                       "A bald eagle. A bicycle. No hurry."};
+  const char* caption = kCaptions[static_cast<int>(bird)];
   char stats[128], number[24];
   if (landscape) {
     float left = safe.x + 24 * s;
@@ -458,7 +569,7 @@ Controls draw_overlay(Renderer& r, Rect safe, int count, int pressed, float fps,
   button(controls.quality, Control::kQuality, maximum ? "Ultra" : "High", 16);
   button(controls.pause, Control::kPause, paused ? "Resume" : "Pause",
          std::min(18.f, (controls.pause.w / s - 12) / 3.6f));
-  button(controls.bird, Control::kBird, bird == Bird::kFlamingo ? "Flamingo" : "Pelican",
+  button(controls.bird, Control::kBird, kNames[static_cast<int>(bird)],
          std::min(16.f, (controls.bird.w / s - 12) / 4.3f));
   button(controls.add, Control::kAdd, compact ? "+" : "+  Add one", compact ? 24 : 22);
   button(controls.reset, Control::kReset, "Reset", 18);
@@ -473,8 +584,12 @@ Vec3 neck_center(float t, Bird bird) {
   constexpr Vec3 kPelican[] = {{-.26f, 2.0f, 0},  {-.20f, 2.12f, 0}, {-.04f, 2.42f, 0},
                                {-.06f, 2.72f, 0}, {.10f, 2.97f, 0},  {.43f, 3.12f, 0},
                                {.56f, 3.14f, 0}};
-  std::span<const Vec3> points =
-      bird == Bird::kFlamingo ? std::span<const Vec3>{kFlamingo} : std::span<const Vec3>{kPelican};
+  constexpr Vec3 kEagle[] = {{-.32f, 2.10f, 0}, {-.26f, 2.30f, 0}, {-.15f, 2.52f, 0},
+                             {-.02f, 2.68f, 0}, {.12f, 2.77f, 0},  {.20f, 2.79f, 0},
+                             {.30f, 2.80f, 0}};
+  std::span<const Vec3> points = bird == Bird::kFlamingo ? std::span<const Vec3>{kFlamingo}
+                                 : bird == Bird::kEagle  ? std::span<const Vec3>{kEagle}
+                                                         : std::span<const Vec3>{kPelican};
   int segments = points.size() - 3;
   float segment = std::clamp(t, 0.f, 1.f) * segments;
   int i = std::min(segments - 1, int(segment));
@@ -501,6 +616,68 @@ Result<MeshId> create_scarf(Renderer& r) {
   return create_mesh(r, vertices, indices);
 }
 
+// HARKER in block capitals on a 6-by-10 grid, each stroke a counterclockwise
+// convex quad.
+struct Stroke {
+  float x[4], y[4];
+};
+
+constexpr Stroke kH[] = {
+    {{0, 2, 2, 0}, {0, 0, 10, 10}}, {{4, 6, 6, 4}, {0, 0, 10, 10}}, {{2, 4, 4, 2}, {4, 4, 6, 6}}};
+constexpr Stroke kA[] = {{{0, 2, 2, 0}, {0, 0, 8, 8}},
+                         {{4, 6, 6, 4}, {0, 0, 8, 8}},
+                         {{0, 6, 4.5f, 1.5f}, {8, 8, 10, 10}},
+                         {{2, 4, 4, 2}, {3.5f, 3.5f, 5.5f, 5.5f}}};
+constexpr Stroke kR[] = {
+    {{0, 2, 2, 0}, {0, 0, 10, 10}},          {{2, 4, 4.5f, 2}, {8, 8, 10, 10}},
+    {{4, 6, 6, 4.5f}, {8, 8, 8.5f, 10}},     {{4, 6, 6, 4}, {6, 6, 8, 8}},
+    {{4, 4.5f, 6, 4}, {4.5f, 4.5f, 6, 6}},   {{2, 4, 4, 2}, {4.5f, 4.5f, 6.5f, 6.5f}},
+    {{4, 6, 4.4f, 2.4f}, {0, 0, 4.5f, 4.5f}}};
+constexpr Stroke kK[] = {{{0, 2, 2, 0}, {0, 0, 10, 10}},
+                         {{2, 6, 3.6f, 2}, {4, 10, 10, 7}},
+                         {{3.8f, 6, 4.2f, 2.4f}, {0, 0, 6.2f, 4.6f}}};
+constexpr Stroke kE[] = {{{0, 2, 2, 0}, {0, 0, 10, 10}},
+                         {{2, 6, 6, 2}, {8, 8, 10, 10}},
+                         {{2, 5, 5, 2}, {4, 4, 6, 6}},
+                         {{2, 6, 6, 2}, {0, 0, 2, 2}}};
+constexpr std::span<const Stroke> kHarker[] = {kH, kA, kR, kK, kE, kR};
+
+// Print the word onto the front of the shirt ellipsoid, in its unrotated frame.
+// Subdivided strokes are projected along its forward axis, so the word keeps
+// its shape from the front, and lifted along the surface normal.
+Result<MeshId> create_lettering(Renderer& r) {
+  std::vector<Vertex> vertices;
+  std::vector<unsigned> indices;
+  constexpr int kSteps = 3;
+  constexpr float kUnit = .012f, kGap = 1.5f, kAdvance = 6 + kGap, kMiddle = .14f, kLift = .007f;
+  constexpr float kLeft = -(std::size(kHarker) * kAdvance - kGap) * .5f;
+  for (size_t letter = 0; letter < std::size(kHarker); ++letter)
+    for (const Stroke& stroke : kHarker[letter]) {
+      unsigned first = vertices.size();
+      for (int i = 0; i <= kSteps; ++i)
+        for (int j = 0; j <= kSteps; ++j) {
+          float u = float(i) / kSteps, v = float(j) / kSteps;
+          auto mix = [&](const float* corner) {
+            return (corner[0] * (1 - u) + corner[1] * u) * (1 - v) +
+                   (corner[3] * (1 - u) + corner[2] * u) * v;
+          };
+          // The word reads left to right from the front, toward -Z.
+          float y = kMiddle + (mix(stroke.y) - 5) * kUnit;
+          float z = -(kLeft + letter * kAdvance + mix(stroke.x)) * kUnit;
+          Vec3 d{0, y / kShirtSize.y, z / kShirtSize.z};
+          d.x = std::sqrt(std::max(0.f, 1 - d.y * d.y - d.z * d.z));
+          Vec3 normal = unit({d.x / kShirtSize.x, d.y / kShirtSize.y, d.z / kShirtSize.z});
+          vertices.push_back({Vec3{d.x * kShirtSize.x, y, z} + normal * kLift, normal});
+        }
+      for (int i = 0; i < kSteps; ++i)
+        for (int j = 0; j < kSteps; ++j) {
+          unsigned a = first + i * (kSteps + 1) + j, b = a + kSteps + 1;
+          indices.insert(indices.end(), {a, b, a + 1, a + 1, b, b + 1});
+        }
+    }
+  return create_mesh(r, vertices, indices);
+}
+
 Result<MeshId> create_neck(Renderer& r, Bird bird) {
   std::vector<Vertex> vertices;
   std::vector<unsigned> indices;
@@ -511,9 +688,10 @@ Result<MeshId> create_neck(Renderer& r, Bird bird) {
     Vec3 tangent = unit(neck_center(std::min(1.f, t + .001f), bird) -
                         neck_center(std::max(0.f, t - .001f), bird));
     Vec3 across = unit(cross(tangent, {0, 0, 1}));
-    float radius = bird == Bird::kFlamingo
-                       ? .095f + .075f * std::pow(1 - t, 3.f) + .020f * std::pow(t, 4.f)
-                       : .17f + .14f * std::pow(1 - t, 3.f) + .075f * std::pow(t, 4.f);
+    float radius =
+        bird == Bird::kFlamingo ? .095f + .075f * std::pow(1 - t, 3.f) + .020f * std::pow(t, 4.f)
+        : bird == Bird::kEagle  ? .17f + .06f * std::pow(1 - t, 3.f)
+                                : .17f + .14f * std::pow(1 - t, 3.f) + .075f * std::pow(t, 4.f);
     for (int side = 0; side <= kSides; ++side) {
       float angle = float(side) / kSides * 2 * kPi;
       Vec3 normal = across * std::cos(angle) + Vec3{0, 0, std::sin(angle)};
@@ -535,10 +713,14 @@ Result<Owner<Scene>> create_scene(Renderer& renderer) {
   if (!pelican_neck) return std::unexpected(pelican_neck.error());
   auto flamingo_neck = create_neck(renderer, Bird::kFlamingo);
   if (!flamingo_neck) return std::unexpected(flamingo_neck.error());
+  auto eagle_neck = create_neck(renderer, Bird::kEagle);
+  if (!eagle_neck) return std::unexpected(eagle_neck.error());
   auto scarf = create_scarf(renderer);
   if (!scarf) return std::unexpected(scarf.error());
-  Owner<Scene> scene(new (std::nothrow)
-                         Scene{&renderer, *pelican_neck, *flamingo_neck, *scarf, {}});
+  auto lettering = create_lettering(renderer);
+  if (!lettering) return std::unexpected(lettering.error());
+  Owner<Scene> scene(new (std::nothrow) Scene{
+      &renderer, *pelican_neck, *flamingo_neck, *eagle_neck, *scarf, *lettering, {}});
   if (!scene) return std::unexpected(Error{"Cannot allocate scene state"});
   return scene;
 }
@@ -554,7 +736,7 @@ Result<bool> render_scene(Scene& scene, double time, float yaw, bool maximum, in
                           bool overlay, float density, float zoom, Bird bird) {
   if (!std::isfinite(zoom) || zoom < kMinimumZoom || zoom > kMaximumZoom)
     return std::unexpected(Error{"Invalid camera zoom"});
-  if (bird != Bird::kPelican && bird != Bird::kFlamingo)
+  if (bird != Bird::kPelican && bird != Bird::kFlamingo && bird != Bird::kEagle)
     return std::unexpected(Error{"Invalid bird selection"});
   Renderer& r = *scene.renderer;
   if (auto result = prepare_frame(r, maximum); !result || !*result) return result;
@@ -563,7 +745,7 @@ Result<bool> render_scene(Scene& scene, double time, float yaw, bool maximum, in
   Rect safe = safe_area(content, stats.width, stats.height);
   // Insets and control placement affect only the overlay. The camera always
   // uses the full window, so the world continues behind every control.
-  float target_height = bird == Bird::kFlamingo ? 1.80f : 1.55f;
+  float target_height = bird == Bird::kFlamingo ? 1.80f : bird == Bird::kEagle ? 1.60f : 1.55f;
   if (auto result =
           render(r, camera(time, yaw, float(stats.width) / stats.height, zoom, target_height),
                  {0, target_height, 0}, time, maximum);

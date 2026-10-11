@@ -353,7 +353,9 @@ void apply_control(Runtime& r, Control control) {
       reset_pacing(r);
       break;
     case Control::kBird:
-      r.state.bird = r.state.bird == Bird::kFlamingo ? Bird::kPelican : Bird::kFlamingo;
+      r.state.bird = r.state.bird == Bird::kFlamingo  ? Bird::kPelican
+                     : r.state.bird == Bird::kPelican ? Bird::kEagle
+                                                      : Bird::kFlamingo;
       break;
     case Control::kPause:
       r.state.paused = !r.state.paused;
@@ -789,7 +791,8 @@ Result<Owner<Runtime>> create_runtime(const char* directory, SessionState restor
   if (restored.count < -1 || restored.count > 999999 || !std::isfinite(restored.yaw) ||
       !std::isfinite(restored.time) || restored.time < 0 || !std::isfinite(restored.zoom) ||
       restored.zoom < kMinimumZoom || restored.zoom > kMaximumZoom ||
-      (restored.bird != Bird::kPelican && restored.bird != Bird::kFlamingo))
+      (restored.bird != Bird::kPelican && restored.bird != Bird::kFlamingo &&
+       restored.bird != Bird::kEagle))
     return std::unexpected(Error{"Invalid restored session state"});
   Owner<Runtime> runtime(new (std::nothrow) Runtime);
   if (!runtime) return std::unexpected(Error{"Cannot allocate application runtime"});

@@ -24,9 +24,13 @@ static_assert(offsetof(StateRecord, time) == 24);
 }
 
 SavedState encode_state(const SessionState& state) {
-  unsigned bird_flag = state.bird == Bird::kFlamingo ? 4u : state.bird == Bird::kPelican ? 0u : 8u;
+  // Bits 2 and 3 select the bird; the unused value 3 marks an invalid selection.
+  unsigned bird = state.bird == Bird::kPelican    ? 0u
+                  : state.bird == Bird::kFlamingo ? 1u
+                  : state.bird == Bird::kEagle    ? 2u
+                                                  : 3u;
   StateRecord record{kMagic,      kVersion,
-                     state.count, (state.maximum ? 1u : 0u) | (state.paused ? 2u : 0u) | bird_flag,
+                     state.count, (state.maximum ? 1u : 0u) | (state.paused ? 2u : 0u) | bird << 2,
                      state.yaw,   state.zoom,
                      state.time};
   SavedState bytes;
@@ -39,8 +43,9 @@ common::Result<SessionState> decode_state(std::span<const std::byte> bytes) {
     return std::unexpected(common::Error{"Invalid Activity state size"});
   StateRecord record;
   std::memcpy(&record, bytes.data(), bytes.size());
+  unsigned bird = record.flags >> 2 & 3;
   if (record.magic != kMagic || record.version != kVersion || record.count < 0 ||
-      record.count > 999999 || (record.flags & ~7u) || !std::isfinite(record.yaw) ||
+      record.count > 999999 || (record.flags & ~15u) || bird == 3 || !std::isfinite(record.yaw) ||
       !std::isfinite(record.time) || record.time < 0 || !std::isfinite(record.zoom) ||
       record.zoom < kMinimumZoom || record.zoom > kMaximumZoom)
     return std::unexpected(common::Error{"Invalid or unsupported Activity state"});
@@ -50,6 +55,8 @@ common::Result<SessionState> decode_state(std::span<const std::byte> bytes) {
                       record.yaw,
                       record.time,
                       record.zoom,
-                      record.flags & 4 ? Bird::kFlamingo : Bird::kPelican};
+                      bird == 1   ? Bird::kFlamingo
+                      : bird == 2 ? Bird::kEagle
+                                  : Bird::kPelican};
 }
 }

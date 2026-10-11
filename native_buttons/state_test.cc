@@ -8,7 +8,7 @@ int main() {
   for (int count : {0, 12, 999999})
     for (bool maximum : {false, true})
       for (bool paused : {false, true})
-        for (Bird bird : {Bird::kPelican, Bird::kFlamingo}) {
+        for (Bird bird : {Bird::kPelican, Bird::kFlamingo, Bird::kEagle}) {
           SessionState original{count, maximum, paused, -2.25f, 12345.5f, 1.75f, bird};
           auto restored = decode_state(encode_state(original));
           if (!restored || restored->count != count || restored->maximum != maximum ||
@@ -36,7 +36,7 @@ int main() {
     invalid[offset] = std::byte{0xff};
     if (decode_state(invalid)) return 4;
   }
-  for (auto invalid : {SessionState{.count = 1, .bird = static_cast<Bird>(2)},
+  for (auto invalid : {SessionState{.count = 1, .bird = static_cast<Bird>(3)},
                        SessionState{.count = -1}, SessionState{.count = 1000000},
                        SessionState{.count = 1, .yaw = std::numeric_limits<float>::infinity()},
                        SessionState{.count = 1, .time = std::numeric_limits<double>::quiet_NaN()},

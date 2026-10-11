@@ -1,11 +1,11 @@
 # Native Buttons
 
-A native C++23 Android app with an animated 3D pelican or flamingo riding a bicycle
-along a coastal causeway. The scene fills the window in both orientations, with
-translucent controls floating over it: in portrait, detail, pause, and bird
-toggles under the title and a counter panel at the bottom; in landscape, a side
-panel. The app requests no permissions, works offline, and keeps the screen on
-while it is shown.
+A native C++23 Android app with an animated 3D pelican, flamingo, or bald eagle
+riding a bicycle along a coastal causeway. The scene fills the window in both
+orientations, with translucent controls floating over it: in portrait, detail,
+pause, and bird toggles under the title and a counter panel at the bottom; in
+landscape, a side panel. The app requests no permissions, works offline, and
+keeps the screen on while it is shown.
 
 Rendering uses hardware Vulkan 1.4, with instanced geometry,
 physically based lighting, animated water, soft shadow mapping, floating-point
@@ -21,7 +21,12 @@ The reusable renderer lives in `//common/gpu`; the birds, bicycle, scenery,
 animation shaders, and controls live in this directory. The flamingo
 has soft pink plumage, a slender curved neck, and a short dark-tipped beak. It
 pedals, breathes, and flexes its neck and wings; its large eyes glance around,
-blink, and flutter. Its mint scarf deforms on the GPU.
+blink, and flutter. Its mint scarf deforms on the GPU. The bald eagle has a
+white head, a hooked golden beak, a stern brow, brown wings, and feathered legs
+above golden talons. It wears a white ringer T-shirt with green collar and cuffs
+and **HARKER** across the chest in green block capitals. The lettering is a mesh
+built with the scene and projected onto the shirt's curved front, so the word
+keeps its shape when viewed head-on and follows the cloth as the eagle breathes.
 There is no software rasterizer.
 On-screen rendering requires `VK_EXT_swapchain_maintenance1` with its instance
 dependencies, and `VK_GOOGLE_display_timing`. Presentation fences keep swapchain
@@ -51,10 +56,11 @@ A paused scene needs GPU work only for a changed surface or pending redraw. This
 also covers visible but inactive split-screen windows. Monitoring stops when the Activity
 is hidden or the surface is detached, and resumes when it becomes visible.
 The feet and crank arms share the same forward-pedaling motion.
-Tap **Flamingo / Pelican** beside the detail and pause controls to switch birds.
-The selector shows the current bird, and the scene caption follows it. Switching
-works while paused and preserves the counter, detail level, animation time, yaw,
-and zoom. Each bird has its own neck shape and camera framing. Both meshes are
+Tap the bird selector beside the detail and pause controls to cycle from
+**Flamingo** to **Pelican** to **Eagle**. The selector shows the current bird,
+and the scene caption follows it. Switching works while paused and preserves the
+counter, detail level, animation time, yaw, and zoom. Each bird has its own neck
+shape and camera framing. All three neck meshes and the eagle's lettering are
 created with the scene, so switching needs no resource rebuild.
 **High detail** uses native resolution,
 4x MSAA, 2048-pixel shadows, and 16,384 particles. **Ultra detail** uses
@@ -160,7 +166,7 @@ the workspace root:
 bazel build //native_buttons
 ```
 
-Output: `bazel-bin/native_buttons/native_buttons.apk`, 82,203 bytes, with a v4
+Output: `bazel-bin/native_buttons/native_buttons.apk`, 86,299 bytes, with a v4
 `native_buttons.apk.idsig` beside it. `bazel build //...` builds both apps, the
 tests, and the tools.
 
@@ -206,9 +212,9 @@ bazel run //native_buttons:gpu_probe -- /tmp/flamingo.ppm 1080 2400 0
 All arguments are optional: the path, the size (1080x2400 by default, each side
 1 to 4096), the quality (`0` for High, any other number for Ultra), the
 animation start time in seconds (2 by default), pixels per dp, zoom (1 by
-default, 0.5 to 2.5), and `pelican` or `flamingo` (the default). The default
-density gives the shorter image dimension a width of 360 dp, and the overlay
-shows a count of 7. For example,
+default, 0.5 to 2.5), and `pelican`, `flamingo` (the default), or `eagle`. The
+default density gives the shorter image dimension a width of 360 dp, and the
+overlay shows a count of 7. For example,
 `/tmp/landscape.ppm 960 432 0 12 1.2 1.5 pelican` renders the pelican in an
 800-by-360 dp landscape view at 1.5x zoom.
 Probe throughput is a synchronous
@@ -278,9 +284,9 @@ taps after pinching, and chronological processing of batched motion.
 The renderer test runs `gpu_probe` with `--exercise` on portrait and landscape
 offscreen targets: preparation boundaries, High/Ultra/High changes, readback,
 opaque output under the UI, the exact MSAA, particle, and triangle workload of
-both birds, switching birds at a frozen timestamp, camera zoom at both limits,
-identical images for equal timestamps, and fixed-quality animation with the
-changing UI excluded. Fixed-camera captures also check shader-driven motion at
+all three birds in both detail levels, switching birds at a frozen timestamp,
+camera zoom at both limits, identical images for equal timestamps, and
+fixed-quality animation with the changing UI excluded. Fixed-camera captures also check shader-driven motion at
 large timestamps and across phase wraps. The presentation test uses real GPU
 commands with a simulated display boundary to exercise delayed window-size
 reports, capabilities cached until presentation, all four rotations,
@@ -338,8 +344,9 @@ signature, with the v4 `.idsig` beside it.
 
 ## Historical Vulkan migration measurements
 
-These measurements describe the pelican scene. The flamingo option
-has a different mesh workload: 739,398 triangles in High and 862,150 in Ultra.
+These measurements describe the pelican scene. The other birds have different
+mesh workloads: the flamingo has 739,398 triangles in High and 862,150 in Ultra,
+and the eagle 598,078 and 720,830.
 
 Measured on this Pixel 8 Pro / Mali-G715, comparing the saved release from commit
 `62d0917` with the Vulkan release. Both executables ran locally from Android's
